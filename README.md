@@ -119,6 +119,16 @@ amu compile src/oak/kernel.kotoba --jvm-free --target wasm32-browser \
             --policy src/oak/policy.edn --output oak.wasm
 ```
 
+Measured 2026-08-31: an 8,394-byte `wasm32-browser-kotoba-v1` module, with no
+JVM anywhere. That path did not work when this repository was written -- the
+`compile` half failed while `check` passed, at two separate places where an
+i64 reached a host operation that cannot take a BigInt. Both are fixed
+upstream (kotoba-kir `uleb`, kotoba-wasm's capability import key), and both
+needed their repository to grow a ClojureScript test runner first, because
+every test in them was `.clj` and the `:cljs` branches had never been run.
+Use a `kotoba-kir` at or past `f0a56e9` and a `kotoba-wasm` at or past
+`34557de`.
+
 `dataspace-v1` is qualified on `:reference`, `:wasm-aot`, `:native-aot` and
 `:jit` — the only kit qualified across all four — which is why the graph plane
 is this kit and not something built here. Check
