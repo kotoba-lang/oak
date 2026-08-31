@@ -119,15 +119,34 @@ amu compile src/oak/kernel.kotoba --jvm-free --target wasm32-browser \
             --policy src/oak/policy.edn --output oak.wasm
 ```
 
-Measured 2026-08-31: an 8,394-byte `wasm32-browser-kotoba-v1` module, with no
-JVM anywhere. That path did not work when this repository was written -- the
-`compile` half failed while `check` passed, at two separate places where an
-i64 reached a host operation that cannot take a BigInt. Both are fixed
-upstream (kotoba-kir `uleb`, kotoba-wasm's capability import key), and both
+`check` passes as written. **`compile` does not yet, and the reason is a
+stale pin rather than a missing capability.**
+
+That path did not work at all when this repository was written: `check`
+passed and `compile` reported an internal compiler error, at two separate
+places where an i64 reached a host operation that cannot take a BigInt —
+`uleb` in kotoba-kir, and the capability import key in kotoba-wasm. Both are
+fixed and merged (`kotoba-kir` `f0a56e9`, `kotoba-wasm` `34557de`), and both
 needed their repository to grow a ClojureScript test runner first, because
 every test in them was `.clj` and the `:cljs` branches had never been run.
-Use a `kotoba-kir` at or past `f0a56e9` and a `kotoba-wasm` at or past
-`34557de`.
+
+With those two sources on the classpath the kernel emits an **8,394-byte
+`wasm32-browser-kotoba-v1` module with no JVM anywhere** (measured
+2026-08-31). But `bin/amu` resolves its own dependency closure from amu's
+`deps-lock.edn`, which still pins `kotoba-kir` at `099c627` and
+`kotoba-wasm` at `87a5c0b` — both from before the fixes — so the CLI as
+invoked above still fails. Until amu's pins advance, emit through the
+compiler directly:
+
+```sh
+nbb --classpath "<amu>/src:<amu>/resources:<kotoba-kir>/src:<kotoba-sema>/src:..." \
+    <amu>/src/kotoba/compiler/nbb/wasm_cli.cljs compile src/oak/kernel.kotoba \
+    --target wasm32-browser --policy src/oak/policy.edn --output oak.wasm
+```
+
+Advancing amu's pins was left alone on purpose: it would pull in every other
+change to those two repositories since, which is a decision about amu and not
+about this kernel.
 
 `dataspace-v1` is qualified on `:reference`, `:wasm-aot`, `:native-aot` and
 `:jit` — the only kit qualified across all four — which is why the graph plane
