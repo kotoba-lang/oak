@@ -119,34 +119,29 @@ amu compile src/oak/kernel.kotoba --jvm-free --target wasm32-browser \
             --policy src/oak/policy.edn --output oak.wasm
 ```
 
-`check` passes as written. **`compile` does not yet, and the reason is a
-stale pin rather than a missing capability.**
-
-That path did not work at all when this repository was written: `check`
-passed and `compile` reported an internal compiler error, at two separate
-places where an i64 reached a host operation that cannot take a BigInt —
-`uleb` in kotoba-kir, and the capability import key in kotoba-wasm. Both are
-fixed and merged (`kotoba-kir` `f0a56e9`, `kotoba-wasm` `34557de`), and both
-needed their repository to grow a ClojureScript test runner first, because
-every test in them was `.clj` and the `:cljs` branches had never been run.
-
-With those two sources on the classpath the kernel emits an **8,394-byte
-`wasm32-browser-kotoba-v1` module with no JVM anywhere** (measured
-2026-08-31). But `bin/amu` resolves its own dependency closure from amu's
-`deps-lock.edn`, which still pins `kotoba-kir` at `099c627` and
-`kotoba-wasm` at `87a5c0b` — both from before the fixes — so the CLI as
-invoked above still fails. Until amu's pins advance, emit through the
-compiler directly:
+Measured 2026-08-31, all JVM-free: an **8,394-byte
+`wasm32-browser-kotoba-v1` module**, which instantiates on
+`amu/runtime/browser-host.mjs` and returns the same `document-sha256` for S as
+the reference interpreter does.
 
 ```sh
-nbb --classpath "<amu>/src:<amu>/resources:<kotoba-kir>/src:<kotoba-sema>/src:..." \
-    <amu>/src/kotoba/compiler/nbb/wasm_cli.cljs compile src/oak/kernel.kotoba \
-    --target wasm32-browser --policy src/oak/policy.edn --output oak.wasm
+nbb test/browser-parity.cljs    # OAK_SOURCE / OAK_WASM / OAK_BROWSER_HOST
 ```
 
-Advancing amu's pins was left alone on purpose: it would pull in every other
-change to those two repositories since, which is a decision about amu and not
-about this kernel.
+That parity check covers S's identity and nothing more. Exercising the
+dataspace capability on wasm needs a provider written against the browser
+host's own value representation, and there is not one here — so **conformance
+still runs only on the interpreter**, and the kernel is not yet known to
+*admit* identically on both backends.
+
+None of this path worked when the kernel was written: `check` passed and
+`compile` reported an internal compiler error, at two places where an i64
+reached a host operation that cannot take a BigInt — `uleb` in kotoba-kir and
+the capability import key in kotoba-wasm. Fixing those needed both
+repositories to grow a ClojureScript test runner first, because every test in
+them was `.clj` and the `:cljs` branches had never been run. Requires
+`kotoba-kir` ≥ `ff7a3ae`, `kotoba-wasm` ≥ `34557de`, and an `amu` whose own
+`deps-lock.edn` has advanced to them.
 
 `dataspace-v1` is qualified on `:reference`, `:wasm-aot`, `:native-aot` and
 `:jit` — the only kit qualified across all four — which is why the graph plane
@@ -165,6 +160,7 @@ and confirming that what went red was what the check is named after:
 | capacity guard removed | the two capacity checks, reporting the provider's own `document-edn-read vector item limit exceeded` |
 | evidence digest replaced with a constant | "every result carries the digest of the schema that admitted it" |
 | query results discarded | six checks, starting with the ones that depend on a type being readable |
+| the module compiled from a different S | the wasm/interpreter digest check, with both digests printed |
 
 ## Boundaries with the nearest repositories
 
