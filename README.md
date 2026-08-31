@@ -128,11 +128,27 @@ the reference interpreter does.
 nbb test/browser-parity.cljs    # OAK_SOURCE / OAK_WASM / OAK_BROWSER_HOST
 ```
 
-That parity check covers S's identity and nothing more. Exercising the
-dataspace capability on wasm needs a provider written against the browser
-host's own value representation, and there is not one here — so **conformance
-still runs only on the interpreter**, and the kernel is not yet known to
-*admit* identically on both backends.
+That parity check covers S's identity and nothing more. **Conformance still
+runs only on the interpreter**, and the kernel is not yet known to *admit*
+identically on both backends.
+
+Two things stand between here and running it on wasm, and the first is not
+effort but the host's contract. Measured 2026-08-31 against
+`amu/runtime/browser-host.mjs`:
+
+- **External JavaScript cannot construct a `[:variant :oak/call …]` to pass
+  into `oak-call`.** A compound argument goes through `assertValue`, which
+  rejects any value the host did not itself mint
+  (`forged compound typed value rejected`), and the constructors the host
+  hands out — `instance.typedValues` — are `vectorI64`, `vectorF64`,
+  `stringIndex`, `disjointSetI64`, `document`, `bytes`. There is no record or
+  variant among them. So a browser-shaped entry point has to take **scalars**
+  (`:string`, `:keyword`) and build the call value *inside the guest*, which
+  keeps admission in one place but is a second door.
+- A `typedCapCall` provider *can* return compound values — that direction goes
+  through `admitHostResult`, which mints from plain frozen arrays — so a real
+  dataspace on the host side is possible. It needs
+  `provider.dataspace`'s results rewritten into the host's descriptors.
 
 None of this path worked when the kernel was written: `check` passed and
 `compile` reported an internal compiler error, at two places where an i64
