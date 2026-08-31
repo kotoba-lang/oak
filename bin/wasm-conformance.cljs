@@ -1,0 +1,62 @@
+(ns bin.wasm-conformance
+  "Compile the kernel and run the conformance checks against the MODULE.
+
+      nbb bin/wasm-conformance.cljs        # from the repository root
+
+  Needs `amu` on PATH (or AMU pointing at a checkout's `bin/amu`), an `amu`
+  whose own `deps-lock.edn` has advanced far enough to emit a guest that
+  declares a capability, and the sibling checkouts `bin/conformance.cljs`
+  lists.
+
+  A step that cannot run exits 2 -- neither 0 nor 1 -- and says which one."
+  (:require [clojure.string :as str]
+            ["node:child_process" :as child]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]))
+
+(def root (.cwd js/process))
+(def kernel (.join path root "src" "oak" "kernel.kotoba"))
+(def policy (.join path root "src" "oak" "policy.edn"))
+
+(when-not (.existsSync fs kernel)
+  (println "run this from the repository root: nbb bin/wasm-conformance.cljs")
+  (.exit js/process 2))
+
+(def amu (or (aget (.-env js/process) "AMU") "amu"))
+(def out (.join path (.mkdtempSync fs (.join path (.tmpdir os) "oak-")) "oak.wasm"))
+
+(def compiled
+  (.spawnSync child amu
+              (clj->js ["compile" kernel "--jvm-free" "--target" "wasm32-browser"
+                        "--policy" policy "--output" out])
+              #js {:cwd root :encoding "utf8"}))
+
+(when-not (zero? (or (.-status compiled) 1))
+  (println "REFUSING to report a result: the kernel did not compile, so this")
+  (println "would be measuring the toolchain rather than the kernel.")
+  (println (or (.-stdout compiled) "") (or (.-stderr compiled) ""))
+  (.exit js/process 2))
+
+(def host
+  (let [candidates (keep (fn [d] (let [p (.join path d "runtime" "browser-host.mjs")]
+                                   (when (.existsSync fs p) p)))
+                         [(or (aget (.-env js/process) "AMU_ROOT") "")
+                          (.resolve path root ".." "amu")])]
+    (or (first candidates)
+        (do (println "REFUSING to report a result: runtime/browser-host.mjs was not")
+            (println "found. Set AMU_ROOT to an amu checkout.")
+            (.exit js/process 2)))))
+
+(def result
+  (.spawnSync child "nbb"
+              (clj->js ["--classpath" (or (aget (.-env js/process) "OAK_CLASSPATH") "")
+                        (.join path root "test" "wasm-conformance.cljs")])
+              #js {:cwd root :stdio "inherit"
+                   :env (js/Object.assign
+                         #js {} js/process.env
+                         #js {"OAK_WASM" out
+                              "OAK_BROWSER_HOST" (str "file://" host)})}))
+
+(when (.-error result) (throw (.-error result)))
+(.exit js/process (or (.-status result) 70))

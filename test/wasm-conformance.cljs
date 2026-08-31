@@ -1,0 +1,204 @@
+(ns wasm-conformance
+  "The same semantic checks as `conformance.cljs`, run against the COMPILED
+  module on `amu/runtime/browser-host.mjs` instead of the reference
+  interpreter.
+
+  Two things had to exist for this to be possible at all.
+
+  A call cannot arrive from outside. `browser-host.mjs` admits a compound
+  argument only if the host itself minted it, and the constructors it hands
+  out are vector-i64, vector-f64, string-index, disjoint-set-i64, document and
+  bytes -- no record, no variant. So the kernel carries `call-*` entries that
+  take scalars and assemble the call value in the guest. Admission is still
+  reached in one place; only the door is new.
+
+  A result CAN be returned: that direction goes through `admitHostResult`,
+  which mints from plain frozen arrays. So the dataspace here is real --
+  `provider.dataspace`, the same one the interpreter run uses -- with a bridge
+  either side of it. The bridge is structural and small because the host's
+  document form IS the KIR document form; the only difference is that a
+  keyword is the string \":is-a\" on one side and the keyword :is-a on the
+  other.
+
+  ONE CALL, ONE INSTANCE. A module's fuel is spent over the instance's life,
+  not per call, so a run that reuses an instance traps `unreachable` partway
+  through -- measured here after four checks. The dataspace outlives the
+  instances because the provider is the host's, not the guest's, which is the
+  same shape `amu/runtime/dom-driver.mjs` uses for the same reason."
+  (:require [provider.dataspace :as ds]
+            ["node:fs" :as fs]))
+
+(def env (.-env js/process))
+
+;; -- documents ------------------------------------------------------------
+
+(defn- host->kir-doc [node]
+  (let [tag (aget node 0) payload (aget node 1)]
+    (case tag
+      ("vector" "list" "set") [tag (mapv host->kir-doc payload)]
+      "map" [tag (mapv (fn [e] [(host->kir-doc (aget e 0)) (host->kir-doc (aget e 1))])
+                       payload)]
+      "keyword" [tag (keyword (subs payload 1))]
+      "symbol" [tag (symbol payload)]
+      "null" [tag]
+      [tag payload])))
+
+(defn- kir->host-doc [node]
+  (let [tag (first node) payload (second node)]
+    (case tag
+      ("vector" "list" "set") #js [tag (clj->js (mapv kir->host-doc payload))]
+      "map" #js [tag (clj->js (mapv (fn [[k v]] #js [(kir->host-doc k) (kir->host-doc v)])
+                                    payload))]
+      "keyword" #js [tag (str payload)]
+      "symbol" #js [tag (str payload)]
+      "null" #js [tag]
+      #js [tag payload])))
+
+;; -- the capability bridge -------------------------------------------------
+
+(defn- member-descriptor [descriptor tag]
+  (second (first (filter #(= tag (aget % 0)) (aget descriptor 2)))))
+
+(defn- host->kir-request
+  "Rebuilt case by case rather than walked generically: the kit has five of
+  them, and naming each one keeps a shape change loud."
+  [request]
+  (let [tag (aget request 1) payload (aget request 2)]
+    (case tag
+      ":assert"  [ds/request-type :assert
+                  [ds/assert-type (host->kir-doc (aget payload 1)) (aget payload 2)]]
+      ":retract" [ds/request-type :retract
+                  [ds/retract-type (host->kir-doc (aget payload 1)) (aget payload 2)]]
+      ":observe" [ds/request-type :observe
+                  [ds/observe-type (host->kir-doc (aget payload 1)) (aget payload 2)]]
+      ":facet-enter" [ds/request-type :facet-enter payload]
+      ":facet-leave" [ds/request-type :facet-leave payload])))
+
+(defn- kir->host-result [descriptor result]
+  (let [tag (str (second result))
+        payload (nth result 2)
+        member (member-descriptor descriptor tag)]
+    (js/Object.freeze
+     #js [descriptor tag
+          (js/Object.freeze
+           (case tag
+             ":asserted"  #js [member (nth payload 1) (kir->host-doc (nth payload 2))]
+             ":retracted" #js [member (nth payload 1)]
+             ":matches"   #js [member (kir->host-doc (nth payload 1))
+                               (kir->host-doc (nth payload 2))]
+             ":facet"     #js [member (nth payload 1)]
+             ":error"     #js [member (str (nth payload 1)) (nth payload 2)]))])))
+
+;; -- the run ---------------------------------------------------------------
+
+(def failures (atom 0))
+
+(defn- check [label ok? detail]
+  (if ok?
+    (println "PASS" label)
+    (do (println "FAIL" label (pr-str detail)) (swap! failures inc))))
+
+(defn- outcome
+  "`[:ok value evidence]` or `[:rejected code detail]` from a host-returned
+  outcome variant, which external JavaScript may READ even though it may not
+  construct one."
+  [v]
+  (let [payload (aget v 2)]
+    (if (= ":ok" (aget v 1))
+      [:ok (aget payload 1) (aget payload 2)]
+      [:rejected (keyword (subs (aget payload 1) 1)) (aget payload 2)])))
+
+(defn- doc-items [d] (vec (aget d 1)))
+(defn- doc-i64 [d] (str (aget d 1)))
+
+(defn- world
+  "One dataspace, and a way to spend one fresh instance against it."
+  [host wasm]
+  (let [provider (ds/provider)]
+    (fn [f & args]
+      (-> ((.-instantiateKotoba host) wasm
+           #js {:allowCapabilities #js [24]
+                :typedCapCall
+                (fn [_id request contract]
+                  (kir->host-result (.-result contract)
+                                    ((:invoke provider) (host->kir-request request))))})
+          (.then (fn [i]
+                   (let [ex (.-exports (.-instance i))]
+                     (if (= "schema-digest" f)
+                       ((aget ex f))
+                       (outcome (apply (aget ex f) args))))))))))
+
+(defn- steps
+  "Run FS, a vector of one-argument functions of the accumulated results,
+  sequentially -- each spends its own instance."
+  [call fns]
+  (reduce (fn [p f] (.then p (fn [acc] (.then (f acc) #(conj acc %)))))
+          (js/Promise.resolve []) fns))
+
+(defn- admission-run [call]
+  (steps call
+         [(fn [_] (call "call-declare" "t-1" ":tender"))
+          (fn [_] (call "call-declare" "x-1" ":spaceship"))
+          (fn [_] (call "call-declare" "s-9" ":supplier"))
+          (fn [_] (call "call-declare" "a-4" ":agency"))
+          (fn [_] (call "call-relate" "t-1" ":awarded-to" "s-9"))
+          (fn [_] (call "call-relate" "s-9" ":awarded-to" "t-1"))
+          (fn [_] (call "call-relate" "t-1" ":awarded-to" "a-4"))
+          (fn [_] (call "call-relate" "t-1" ":sponsors" "s-9"))
+          (fn [_] (call "call-relate" "t-1" ":awarded-to" "ghost"))
+          (fn [_] (call "call-related" "t-1" ":awarded-to"))
+          (fn [_] (call "call-census" ":tender"))
+          (fn [_] (call "schema-digest"))]))
+
+(defn- report-admission [r]
+  (let [[good bad _ _ ok dom rng unk untyped related census digest] r]
+    (check "an entity of a declared type is admitted" (= :ok (first good)) good)
+    (check "an entity of an undeclared type is refused"
+           (= :oak/unknown-entity-type (second bad)) bad)
+    (check "a fact matching domain and range is admitted" (= :ok (first ok)) ok)
+    (check "a subject of the wrong type is a domain violation"
+           (= :oak/domain-violation (second dom)) dom)
+    (check "an object of the wrong type is a range violation"
+           (= :oak/range-violation (second rng)) rng)
+    (check "a relation absent from S is refused by name"
+           (= :oak/unknown-relation (second unk)) unk)
+    (check "an endpoint the graph has no type for is refused as untyped"
+           (= :oak/untyped-object (second untyped)) untyped)
+    (check "a read returns exactly the objects the admitted facts named"
+           (= [["string" "s-9"]] (mapv vec (doc-items (second related))))
+           (mapv vec (doc-items (second related))))
+    (check "a count is over the type the caller named, not over everything"
+           (= "1" (doc-i64 (second census))) census)
+    (check "every result carries the digest of the schema that admitted it"
+           (= digest (aget (first (doc-items (nth census 2))) 1))
+           {:digest digest :evidence (mapv vec (doc-items (nth census 2)))})))
+
+(defn- refusal-leaves-nothing [call]
+  (-> (steps call
+             [(fn [_] (call "call-declare" "t-1" ":tender"))
+              (fn [_] (call "call-declare" "a-4" ":agency"))
+              (fn [_] (call "call-relate" "t-1" ":awarded-to" "a-4"))
+              (fn [_] (call "call-related" "t-1" ":awarded-to"))])
+      (.then (fn [r]
+               (let [after (nth r 3)]
+                 (check "a refused call writes nothing the graph will answer with"
+                        (and (= :ok (first after)) (empty? (doc-items (second after))))
+                        after))))))
+
+(-> (js/import (aget env "OAK_BROWSER_HOST"))
+    (.then
+     (fn [host]
+       (let [wasm (.readFileSync fs (aget env "OAK_WASM"))]
+         (-> (admission-run (world host wasm))
+             (.then report-admission)
+             (.then (fn [_] (refusal-leaves-nothing (world host wasm))))
+             (.then (fn [_]
+                      (println (str "\noak on wasm: "
+                                    (if (zero? @failures) "all checks passed"
+                                        (str @failures " failed"))))
+                      (set! (.-exitCode js/process) (if (zero? @failures) 0 1))))
+             (.catch (fn [e]
+                       (println "FAIL the run did not complete:" (.-message e))
+                       (set! (.-exitCode js/process) 1)))))))
+    (.catch (fn [e] (println "FAIL could not load the browser host" (.-message e))
+              (set! (.-exitCode js/process) 1))))

@@ -35,7 +35,7 @@ it cannot avoid:
 
 | OaK wants | Kotoba already gives |
 |---|---|
-| the agent computes only through `F` | `F` is not exported. `oak-call` is, and it is the only door |
+| the agent computes only through `F` | `F` is not exported. Admission is reached in exactly one place |
 | the agent cannot reach the store directly | the graph is behind `:dataspace/transact`, and a guest that does not hold it cannot name a pattern |
 | a refusal is a result, not a crash | no ambient `throw`; every refusal is `[:rejected code detail]` |
 
@@ -73,6 +73,22 @@ below it names `:tender`.
 Refusals are named, not boolean: `:oak/unknown-entity-type`,
 `:oak/unknown-relation`, `:oak/domain-violation`, `:oak/range-violation`,
 `:oak/untyped-subject`, `:oak/untyped-object`, `:oak/graph-at-capacity`.
+
+## Two doors, one admission
+
+`oak-call` takes a call value. A browser host cannot hand it one:
+`browser-host.mjs` admits a compound argument only if the host itself minted
+it, and the constructors it exposes are `vectorI64`, `vectorF64`,
+`stringIndex`, `disjointSetI64`, `document` and `bytes` — no record, no
+variant. So the kernel also exports `call-declare`, `call-relate`,
+`call-related` and `call-census`, which take scalars and assemble the call in
+the guest.
+
+That is a second **entry**, not a second kernel: each one builds the value and
+hands it to `oak-call`, so S is consulted in exactly one place and nothing
+below gains a way to reach the dataspace unadmitted. The conformance suite
+asserts both halves — the export set, and that no `do-*` / `all-*` / `type-of`
+is among it.
 
 Note where the type of an entity lives. It is not an attribute of the call and
 not a field of the schema — it is **an assertion in the graph**, put there by
@@ -128,36 +144,29 @@ the reference interpreter does.
 nbb test/browser-parity.cljs    # OAK_SOURCE / OAK_WASM / OAK_BROWSER_HOST
 ```
 
-That parity check covers S's identity and nothing more. **Conformance still
-runs only on the interpreter**, and the kernel is not yet known to *admit*
-identically on both backends.
+**The kernel's admission now runs on the compiled module too.**
 
-Two things stand between here and running it on wasm, and the first is not
-effort but the host's contract. Measured 2026-08-31 against
-`amu/runtime/browser-host.mjs`:
+```sh
+nbb bin/conformance.cljs         # the reference interpreter
+nbb bin/wasm-conformance.cljs    # the same checks, on the wasm module
+```
 
-- **External JavaScript cannot construct a `[:variant :oak/call …]` to pass
-  into `oak-call`.** A compound argument goes through `assertValue`, which
-  rejects any value the host did not itself mint
-  (`forged compound typed value rejected`), and the constructors the host
-  hands out — `instance.typedValues` — are `vectorI64`, `vectorF64`,
-  `stringIndex`, `disjointSetI64`, `document`, `bytes`. There is no record or
-  variant among them. So a browser-shaped entry point has to take **scalars**
-  (`:string`, `:keyword`) and build the call value *inside the guest*, which
-  keeps admission in one place but is a second door.
-- A `typedCapCall` provider *can* return compound values — that direction goes
-  through `admitHostResult`, which mints from plain frozen arrays — so a real
-  dataspace on the host side is possible. It needs
-  `provider.dataspace`'s results rewritten into the host's descriptors.
+The wasm run uses the same `provider.dataspace` the interpreter run does, with
+a bridge either side of it — small, because the host's document form IS the
+KIR document form; a keyword is the string `":is-a"` on one side and the
+keyword `:is-a` on the other. Results can cross that way because the
+host→guest direction goes through `admitHostResult`, which mints from plain
+frozen arrays.
 
-None of this path worked when the kernel was written: `check` passed and
-`compile` reported an internal compiler error, at two places where an i64
-reached a host operation that cannot take a BigInt — `uleb` in kotoba-kir and
-the capability import key in kotoba-wasm. Fixing those needed both
-repositories to grow a ClojureScript test runner first, because every test in
-them was `.clj` and the `:cljs` branches had never been run. Requires
-`kotoba-kir` ≥ `ff7a3ae`, `kotoba-wasm` ≥ `34557de`, and an `amu` whose own
-`deps-lock.edn` has advanced to them.
+**One call, one instance.** A module's fuel is spent over the instance's life,
+not per call, so a run that reuses an instance traps `unreachable` partway
+through — measured here after four checks. The dataspace outlives the
+instances because the provider is the host's, the same shape
+`amu/runtime/dom-driver.mjs` uses for the same reason.
+
+The suite discriminates on this backend as it does on the other: the domain
+check made vacuous fails only the domain check, showing the call falling
+through to the range check; query results discarded fails six.
 
 `dataspace-v1` is qualified on `:reference`, `:wasm-aot`, `:native-aot` and
 `:jit` — the only kit qualified across all four — which is why the graph plane
@@ -177,6 +186,8 @@ and confirming that what went red was what the check is named after:
 | evidence digest replaced with a constant | "every result carries the digest of the schema that admitted it" |
 | query results discarded | six checks, starting with the ones that depend on a type being readable |
 | the module compiled from a different S | the wasm/interpreter digest check, with both digests printed |
+
+The first and last of those were run against **both** backends and failed the same checks on each. The capacity and evidence mutations were run against the interpreter only — the capacity one needs 34 instances on wasm, which is slow rather than hard.
 
 ## Boundaries with the nearest repositories
 

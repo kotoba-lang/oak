@@ -1,5 +1,6 @@
 (ns oak.kernel
-  (:export [main schema-digest oak-call])
+  (:export [main schema-digest oak-call
+            call-declare call-relate call-related call-census])
   (:capabilities #{:dataspace/transact}))
 
 ;; ---------------------------------------------------------------- S, the schema
@@ -293,3 +294,72 @@
     (:census x (do-census (record-get x :type)))))
 
 (defn main [] 0)
+
+;; ---------------------------------------------------------------- the browser door
+;;
+;; A host cannot hand the kernel a call value. `browser-host.mjs` admits a
+;; compound argument only if the host itself minted it, and the constructors it
+;; exposes are vector-i64, vector-f64, string-index, disjoint-set-i64, document
+;; and bytes -- there is no record and no variant among them. So a call
+;; originating outside the guest has to arrive as scalars and be assembled
+;; here.
+;;
+;; This is a second ENTRY, not a second kernel: each of these builds the call
+;; value and hands it to `oak-call`, so S is still consulted in exactly one
+;; place and nothing below gains a way to reach the dataspace unadmitted.
+
+(defn call-declare [e :string t :keyword]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (oak-call (variant-new [:variant :oak/call
+   [[:declare [:record :oak/declare [[:entity :string] [:type :keyword]]]]
+    [:relate [:record :oak/relate
+              [[:subject :string] [:relation :keyword] [:object :string]]]]
+    [:related [:record :oak/related
+               [[:subject :string] [:relation :keyword]]]]
+    [:census [:record :oak/census [[:type :keyword]]]]]] :declare
+                         (record-new [:record :oak/declare
+                                      [[:entity :string] [:type :keyword]]] e t))))
+
+(defn call-relate [s :string r :keyword o :string]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (oak-call (variant-new [:variant :oak/call
+   [[:declare [:record :oak/declare [[:entity :string] [:type :keyword]]]]
+    [:relate [:record :oak/relate
+              [[:subject :string] [:relation :keyword] [:object :string]]]]
+    [:related [:record :oak/related
+               [[:subject :string] [:relation :keyword]]]]
+    [:census [:record :oak/census [[:type :keyword]]]]]] :relate
+                         (record-new [:record :oak/relate
+                                      [[:subject :string] [:relation :keyword]
+                                       [:object :string]]] s r o))))
+
+(defn call-related [s :string r :keyword]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (oak-call (variant-new [:variant :oak/call
+   [[:declare [:record :oak/declare [[:entity :string] [:type :keyword]]]]
+    [:relate [:record :oak/relate
+              [[:subject :string] [:relation :keyword] [:object :string]]]]
+    [:related [:record :oak/related
+               [[:subject :string] [:relation :keyword]]]]
+    [:census [:record :oak/census [[:type :keyword]]]]]] :related
+                         (record-new [:record :oak/related
+                                      [[:subject :string] [:relation :keyword]]] s r))))
+
+(defn call-census [t :keyword]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (oak-call (variant-new [:variant :oak/call
+   [[:declare [:record :oak/declare [[:entity :string] [:type :keyword]]]]
+    [:relate [:record :oak/relate
+              [[:subject :string] [:relation :keyword] [:object :string]]]]
+    [:related [:record :oak/related
+               [[:subject :string] [:relation :keyword]]]]
+    [:census [:record :oak/census [[:type :keyword]]]]]] :census
+                         (record-new [:record :oak/census [[:type :keyword]]] t))))

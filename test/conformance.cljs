@@ -65,10 +65,21 @@
 
 ;; -- the kernel is the only door -------------------------------------------
 
-(let [k (kernel)]
-  (check "the kernel exports only its entry, its digest, and main"
-         (= #{'main 'schema-digest 'oak-call} (set (:exports k)))
-         (:exports k)))
+(let [k (kernel)
+      exports (set (:exports k))]
+  ;; The `call-*` entries exist because a browser host cannot mint a call
+  ;; value to pass in (see test/wasm-conformance.cljs). They are doors, not
+  ;; kernels: each assembles the call and hands it to `oak-call`. What must
+  ;; stay true is that NOTHING reaching the dataspace is exported -- no
+  ;; `do-declare`, no `assert!` wrapper, no schema mutator.
+  (check "the kernel exports its entry, its doors, its digest, and main"
+         (= #{'main 'schema-digest 'oak-call
+              'call-declare 'call-relate 'call-related 'call-census}
+            exports)
+         exports)
+  (check "nothing that touches the graph without admission is exported"
+         (empty? (filter #(re-find #"^(do-|all-|ds-|type-of|assert)" (name %)) exports))
+         exports))
 
 ;; -- S admits what it declares, and refuses what it does not ----------------
 
