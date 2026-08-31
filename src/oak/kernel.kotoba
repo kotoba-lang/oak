@@ -1,0 +1,295 @@
+(ns oak.kernel
+  (:export [main schema-digest oak-call])
+  (:capabilities #{:dataspace/transact}))
+
+;; ---------------------------------------------------------------- S, the schema
+
+(defn schema-doc [] :document
+  [[:entity :agency]
+   [:entity :tender]
+   [:entity :supplier]
+   [:relation :issued-by :tender :agency]
+   [:relation :awarded-to :tender :supplier]])
+
+(defn schema-digest [] :string (document-sha256 (schema-doc)))
+
+;; ---------------------------------------------------------------- document helpers
+
+(defn at [d :document i :i64] :document
+  (option-or (document-vector-at d i) (document-null)))
+
+(defn kw-at [d :document i :i64] :keyword
+  (option-or (document-keyword-value (at d i)) :oak/none))
+
+(defn field [m :document k :string] :document
+  (option-or (document-get m (document-symbol (symbol k))) (document-null)))
+
+(defn field-str [m :document k :string] :string
+  (option-or (document-string-value (field m k)) ""))
+
+(defn field-kw [m :document k :string] :keyword
+  (option-or (document-keyword-value (field m k)) :oak/none))
+
+;; ---------------------------------------------------------------- S lookups
+
+(defn entity-scan [s :document i :i64 t :keyword] :bool
+  (if (= i (document-count s))
+    false
+    (let [row (at s i)]
+      (if (document-equal? (at row 0) (document-keyword :entity))
+        (if (document-equal? (at row 1) (document-keyword t))
+          true
+          (entity-scan s (+ i 1) t))
+        (entity-scan s (+ i 1) t)))))
+
+(defn entity-declared? [t :keyword] :bool
+  (entity-scan (schema-doc) 0 t))
+
+(defn relation-scan [s :document i :i64 r :keyword slot :i64] :keyword
+  (if (= i (document-count s))
+    :oak/none
+    (let [row (at s i)]
+      (if (document-equal? (at row 0) (document-keyword :relation))
+        (if (document-equal? (at row 1) (document-keyword r))
+          (kw-at row slot)
+          (relation-scan s (+ i 1) r slot))
+        (relation-scan s (+ i 1) r slot)))))
+
+(defn relation-domain [r :keyword] :keyword (relation-scan (schema-doc) 0 r 2))
+(defn relation-range [r :keyword] :keyword (relation-scan (schema-doc) 0 r 3))
+
+;; ---------------------------------------------------------------- the KG plane
+;;
+;; Exactly two observe patterns exist, so the kit's 64-observer ceiling is not
+;; a function of how many entities the caller asks about.
+
+(defn ds-bindings [r [:variant :kotoba.dataspace/result
+                      [[:asserted [:record :kotoba.dataspace/asserted
+                                   [[:count :i64] [:notices :document]]]]
+                       [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
+                       [:matches [:record :kotoba.dataspace/matches
+                                  [[:bindings :document] [:notices :document]]]]
+                       [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
+                       [:error [:record :kotoba.dataspace/error
+                                [[:code :keyword] [:message :string]]]]]]] :document
+  (match-variant r
+    [:variant :kotoba.dataspace/result
+     [[:asserted [:record :kotoba.dataspace/asserted
+                  [[:count :i64] [:notices :document]]]]
+      [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
+      [:matches [:record :kotoba.dataspace/matches
+                 [[:bindings :document] [:notices :document]]]]
+      [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
+      [:error [:record :kotoba.dataspace/error
+               [[:code :keyword] [:message :string]]]]]]
+    (:asserted x (document-vector))
+    (:retracted x (document-vector))
+    (:matches x (record-get x :bindings))
+    (:facet x (document-vector))
+    (:error x (document-vector))))
+
+(defn ds-written [r [:variant :kotoba.dataspace/result
+                     [[:asserted [:record :kotoba.dataspace/asserted
+                                  [[:count :i64] [:notices :document]]]]
+                      [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
+                      [:matches [:record :kotoba.dataspace/matches
+                                 [[:bindings :document] [:notices :document]]]]
+                      [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
+                      [:error [:record :kotoba.dataspace/error
+                               [[:code :keyword] [:message :string]]]]]]] :i64
+  (match-variant r
+    [:variant :kotoba.dataspace/result
+     [[:asserted [:record :kotoba.dataspace/asserted
+                  [[:count :i64] [:notices :document]]]]
+      [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
+      [:matches [:record :kotoba.dataspace/matches
+                 [[:bindings :document] [:notices :document]]]]
+      [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
+      [:error [:record :kotoba.dataspace/error
+               [[:code :keyword] [:message :string]]]]]]
+    (:asserted x (record-get x :count))
+    (:retracted x 0)
+    (:matches x 0)
+    (:facet x 0)
+    (:error x -1)))
+
+(defn all-types [] :document
+  (ds-bindings (observe! (document-vector (document-keyword :is-a)
+                                          (document-keyword :?e)
+                                          (document-keyword :?t)))))
+
+(defn all-facts [] :document
+  (ds-bindings (observe! (document-vector (document-keyword :fact)
+                                          (document-keyword :?s)
+                                          (document-keyword :?r)
+                                          (document-keyword :?o)))))
+
+(defn type-scan [b :document i :i64 e :string] :keyword
+  (if (= i (document-count b))
+    :oak/untyped
+    (let [row (at b i)]
+      (if (string=? (field-str row "?e") e)
+        (field-kw row "?t")
+        (type-scan b (+ i 1) e)))))
+
+(defn type-of [e :string] :keyword (type-scan (all-types) 0 e))
+
+(defn census-scan [b :document i :i64 t :keyword n :i64] :i64
+  (if (= i (document-count b))
+    n
+    (if (= (field-kw (at b i) "?t") t)
+      (census-scan b (+ i 1) t (+ n 1))
+      (census-scan b (+ i 1) t n))))
+
+(defn objects-scan [b :document i :i64 s :string r :keyword acc :document] :document
+  (if (= i (document-count b))
+    acc
+    (let [row (at b i)]
+      (if (string=? (field-str row "?s") s)
+        (if (= (field-kw row "?r") r)
+          (objects-scan b (+ i 1) s r
+                        (document-vector-conj acc (document-string (field-str row "?o"))))
+          (objects-scan b (+ i 1) s r acc))
+        (objects-scan b (+ i 1) s r acc)))))
+
+;; ---------------------------------------------------------------- capacity
+;;
+;; A query result is one document, and a document container holds at most 32
+;; items (`document-container-item-limit`), so a graph larger than that has
+;; facts the kernel can no longer read back. The provider does not answer
+;; "too many" -- it traps while encoding, which the guest cannot catch,
+;; because refusing to observe is not one of the outcomes the kit has. So the
+;; ceiling is enforced on the WRITE side instead: the kernel does not admit a
+;; fact it would afterwards be unable to report.
+
+(defn capacity [] :i64 32)
+
+(defn at-capacity? [rows :document] :bool
+  (if (= (document-count rows) (capacity)) true false))
+
+;; ---------------------------------------------------------------- outcomes
+
+(defn evidence [kind :keyword subject :document] :document
+  (document-vector (document-string (schema-digest))
+                   (document-keyword kind)
+                   subject))
+
+(defn ok [value :document ev :document]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (variant-new
+   [:variant :oak/outcome
+    [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+     [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+   :ok
+   (record-new [:record :oak/ok [[:value :document] [:evidence :document]]] value ev)))
+
+(defn rejected [code :keyword detail :string]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (variant-new
+   [:variant :oak/outcome
+    [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+     [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+   :rejected
+   (record-new [:record :oak/rejected [[:code :keyword] [:detail :string]]] code detail)))
+
+;; ---------------------------------------------------------------- F, the functions
+;;
+;; Every one of these is reached only after `oak-call` has admitted the request
+;; against S. Nothing here is exported.
+
+(defn do-declare [e :string t :keyword]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (if (entity-declared? t)
+    (if (at-capacity? (all-types))
+      (rejected :oak/graph-at-capacity e)
+      (let [written (ds-written (assert! (document-vector (document-keyword :is-a)
+                                                          (document-string e)
+                                                          (document-keyword t))))]
+        (ok (document-i64 written)
+            (evidence :declare (document-vector (document-string e) (document-keyword t))))))
+    (rejected :oak/unknown-entity-type e)))
+
+(defn do-relate [s :string r :keyword o :string]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (let [dom (relation-domain r)]
+    (if (= dom :oak/none)
+      (rejected :oak/unknown-relation s)
+      (let [rng (relation-range r)
+            st (type-of s)
+            ot (type-of o)]
+        (if (= st :oak/untyped)
+          (rejected :oak/untyped-subject s)
+          (if (= ot :oak/untyped)
+            (rejected :oak/untyped-object o)
+            (if (= st dom)
+              (if (= ot rng)
+                (if (at-capacity? (all-facts))
+                  (rejected :oak/graph-at-capacity s)
+                  (let [written (ds-written
+                                 (assert! (document-vector (document-keyword :fact)
+                                                           (document-string s)
+                                                           (document-keyword r)
+                                                           (document-string o))))]
+                    (ok (document-i64 written)
+                        (evidence :relate (document-vector (document-string s)
+                                                           (document-keyword r)
+                                                           (document-string o))))))
+                (rejected :oak/range-violation o))
+              (rejected :oak/domain-violation s))))))))
+
+(defn do-related [s :string r :keyword]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (if (= (relation-domain r) :oak/none)
+    (rejected :oak/unknown-relation s)
+    (ok (objects-scan (all-facts) 0 s r (document-vector))
+        (evidence :related (document-vector (document-string s) (document-keyword r))))))
+
+(defn do-census [t :keyword]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (if (entity-declared? t)
+    (ok (document-i64 (census-scan (all-types) 0 t 0))
+        (evidence :census (document-keyword t)))
+    (rejected :oak/unknown-entity-type "census")))
+
+;; ---------------------------------------------------------------- the kernel entry
+;;
+;; The single door. An agent produces a value of the call variant and nothing
+;; else; it never holds the dataspace capability and never names a pattern.
+
+(defn oak-call [call [:variant :oak/call
+                      [[:declare [:record :oak/declare [[:entity :string] [:type :keyword]]]]
+                       [:relate [:record :oak/relate
+                                 [[:subject :string] [:relation :keyword] [:object :string]]]]
+                       [:related [:record :oak/related
+                                  [[:subject :string] [:relation :keyword]]]]
+                       [:census [:record :oak/census [[:type :keyword]]]]]]]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (match-variant call
+    [:variant :oak/call
+     [[:declare [:record :oak/declare [[:entity :string] [:type :keyword]]]]
+      [:relate [:record :oak/relate
+                [[:subject :string] [:relation :keyword] [:object :string]]]]
+      [:related [:record :oak/related
+                 [[:subject :string] [:relation :keyword]]]]
+      [:census [:record :oak/census [[:type :keyword]]]]]]
+    (:declare x (do-declare (record-get x :entity) (record-get x :type)))
+    (:relate x (do-relate (record-get x :subject) (record-get x :relation)
+                          (record-get x :object)))
+    (:related x (do-related (record-get x :subject) (record-get x :relation)))
+    (:census x (do-census (record-get x :type)))))
+
+(defn main [] 0)
