@@ -1,7 +1,7 @@
 (ns bin.wasm-conformance
   "Compile the kernel and run the conformance checks against the MODULE.
 
-      nbb bin/wasm-conformance.cljk        # from the repository root
+      kbb --backend sci bin/wasm-conformance.cljk        # from the repository root
 
   Needs `amu` on PATH (or AMU pointing at a checkout's `bin/amu`), an `amu`
   whose own `deps-lock.edn` has advanced far enough to emit a guest that
@@ -20,7 +20,7 @@
 (def policy (.join path root "src" "oak" "policy.edn"))
 
 (when-not (.existsSync fs kernel)
-  (println "run this from the repository root: nbb bin/wasm-conformance.cljk")
+  (println "run this from the repository root: kbb --backend sci bin/wasm-conformance.cljk")
   (.exit js/process 2))
 
 (def amu (or (aget (.-env js/process) "AMU") "amu"))

@@ -118,7 +118,7 @@ Do not copy either number into code. Measure the host you are on.
 ## Running it
 
 ```sh
-nbb bin/conformance.cljk        # from the repository root
+kbb --backend sci bin/conformance.cljk        # from the repository root
 ```
 
 No JVM: `kotoba.sema`, `kotoba.kir`, `provider.dataspace` and the reference
@@ -141,14 +141,14 @@ Measured 2026-08-31, all JVM-free: an **8,394-byte
 the reference interpreter does.
 
 ```sh
-nbb test/browser-parity.cljk    # OAK_SOURCE / OAK_WASM / OAK_BROWSER_HOST
+kbb --backend sci test/browser-parity.cljk    # OAK_SOURCE / OAK_WASM / OAK_BROWSER_HOST
 ```
 
 **The kernel's admission now runs on the compiled module too.**
 
 ```sh
-nbb bin/conformance.cljk         # the reference interpreter
-nbb bin/wasm-conformance.cljk    # the same checks, on the wasm module
+kbb --backend sci bin/conformance.cljk         # the reference interpreter
+kbb --backend sci bin/wasm-conformance.cljk    # the same checks, on the wasm module
 ```
 
 The wasm run uses the same `provider.dataspace` the interpreter run does, with
