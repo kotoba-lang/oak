@@ -68,7 +68,7 @@
 (let [k (kernel)
       exports (set (:exports k))]
   ;; The `call-*` entries exist because a browser host cannot mint a call
-  ;; value to pass in (see test/wasm-conformance.cljs). They are doors, not
+  ;; value to pass in (see test/wasm-conformance.cljk). They are doors, not
   ;; kernels: each assembles the call and hands it to `oak-call`. What must
   ;; stay true is that NOTHING reaching the dataspace is exported -- no
   ;; `do-declare`, no `assert!` wrapper, no schema mutator.
