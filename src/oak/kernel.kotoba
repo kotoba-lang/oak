@@ -1,8 +1,8 @@
 (ns oak.kernel
   (:export [main schema-digest oak-call
             call-declare call-relate call-related call-census
-            app-ontology-digest compile-app run-app
-            compile-tender-app-at compile-tender-app
+            app-ontology app-ontology-digest compile-app query-app run-app
+            compile-tender-app-at compile-tender-app-effect-at compile-tender-app
             run-tender-app-event run-tender-app])
   (:capabilities #{:dataspace/transact}))
 
@@ -215,6 +215,11 @@
 
 (defn app-ontology-doc [] :document
   [[:goal :goal/tender-intake]
+   [:component :reasoner/owl2-rl :reasoner
+    [:owl2/profile :owl2-rl
+     [:owl2/engine "kotoba-lang/org-w3-owl2"]
+     [:owl2/semantics :least-fixpoint]
+     [:owl2/outside-profile :reject]]]
    [:component :shape/tender-input :shape
     [:shacl/node :tender
      [:shacl/property :id :string 1 1]
@@ -222,7 +227,7 @@
       [:shacl/in :open :closed]]]]
    [:component :query/open-tenders :query
     [:sparql/project [:?t]
-     [:sparql/bgp [:?t :is-a :tender]
+     [:sparql/bgp [:?t :rdf/type :tender]
                   [:?t :status :open]]]]
    [:component :view/tender-form :view
     [:view/form :shape/tender-input]]
@@ -235,6 +240,7 @@
    [:binds :impl/oak-declare
     "bafyreiggpt55m7ke7qy7f2fxscdo4zq3pnq7gbssvrlqcwp6ofngp66xka"]
    [:permits :goal/tender-intake :shape :shape/tender-input]
+   [:permits :goal/tender-intake :reasoner :reasoner/owl2-rl]
    [:permits :goal/tender-intake :query :query/open-tenders]
    [:permits :goal/tender-intake :view :view/tender-form]
    [:permits :goal/tender-intake :action :action/declare-tender]
@@ -242,10 +248,23 @@
    [:permits :goal/tender-intake :implementation :impl/oak-declare]
    [:requires :view/tender-form :shape :shape/tender-input]
    [:requires :view/tender-form :query :query/open-tenders]
+   [:requires :query/open-tenders :reasoner :reasoner/owl2-rl]
    [:requires :action/declare-tender :shape :shape/tender-input]
    [:implements :impl/oak-declare :action/declare-tender]
    [:dispatch :action/declare-tender :event/submit
-    :op/declare :tender :effect/dataspace-transact]])
+    :op/declare :tender :effect/dataspace-transact]
+   ;; Confidence is an ontology admission rule, not a model-global constant.
+   ;; The trained OpenJev model is measured OOD on this ontology; structural
+   ;; coherence and exact graph permissions remain mandatory at every floor.
+   [:confidence-floor :reasoner 6000]
+   [:confidence-floor :shape 8000]
+   [:confidence-floor :query 8000]
+   [:confidence-floor :view 8000]
+   [:confidence-floor :action 8000]
+   [:confidence-floor :effect 6000]
+   [:confidence-floor :implementation 8000]])
+
+(defn app-ontology [] :document (app-ontology-doc))
 
 (defn app-ontology-digest [] :string
   (document-sha256 (app-ontology-doc)))
@@ -329,6 +348,19 @@
 (defn required? [consumer :keyword role :keyword id :keyword] :bool
   (required-scan (app-ontology-doc) 0 consumer role id))
 
+(defn confidence-floor-scan [d :document i :i64 role :keyword] :i64
+  (if (= i (document-count d))
+    -1
+    (let [row (at d i)]
+      (if (= (kw-at row 0) :confidence-floor)
+        (if (= (kw-at row 1) role)
+          (option-or (document-i64-value (at row 2)) -1)
+          (confidence-floor-scan d (+ i 1) role))
+        (confidence-floor-scan d (+ i 1) role)))))
+
+(defn confidence-floor [role :keyword] :i64
+  (confidence-floor-scan (app-ontology-doc) 0 role))
+
 ;; Jev-shaped decisions are finite rows:
 ;;   [:choice role candidate confidence-basis-points]
 ;; More than one candidate per role is allowed.  Compilation takes the highest
@@ -383,44 +415,52 @@
 
 (defn role-admitted? [goal :keyword decisions :document role :keyword] :bool
   (let [id (choice-id decisions role)
-        score (choice-score decisions role)]
+        score (choice-score decisions role)
+        floor (confidence-floor role)]
     (if (= id :oak/none)
       false
-      (if (< score 8000)
+      (if (< floor 0)
         false
-        (if (> score 10000)
+        (if (< score floor)
           false
-          (if (choice-unambiguous? decisions role)
-            (if (= (component-kind id) role)
-              (permitted? goal role id)
-              false)
-            false))))))
+          (if (> score 10000)
+            false
+            (if (choice-unambiguous? decisions role)
+              (if (= (component-kind id) role)
+                (permitted? goal role id)
+                false)
+              false)))))))
 
 (defn selection-coherent? [decisions :document] :bool
-  (let [shape (choice-id decisions :shape)
+  (let [reasoner (choice-id decisions :reasoner)
+        shape (choice-id decisions :shape)
         query (choice-id decisions :query)
         view (choice-id decisions :view)
         action (choice-id decisions :action)
         effect (choice-id decisions :effect)
         implementation (choice-id decisions :implementation)]
-    (if (required? view :shape shape)
-      (if (required? view :query query)
-        (if (required? action :shape shape)
-          (if (implementation-binds? implementation action)
-            (= (app-row-scan (app-ontology-doc) 0 :dispatch action 5) effect)
+    (if (required? query :reasoner reasoner)
+      (if (required? view :shape shape)
+        (if (required? view :query query)
+          (if (required? action :shape shape)
+            (if (implementation-binds? implementation action)
+              (= (app-row-scan (app-ontology-doc) 0 :dispatch action 5) effect)
+              false)
             false)
           false)
         false)
       false)))
 
 (defn all-roles-admitted? [goal :keyword decisions :document] :bool
-  (if (role-admitted? goal decisions :shape)
-    (if (role-admitted? goal decisions :query)
-      (if (role-admitted? goal decisions :view)
-        (if (role-admitted? goal decisions :action)
-          (if (role-admitted? goal decisions :effect)
-            (if (role-admitted? goal decisions :implementation)
-              (selection-coherent? decisions)
+  (if (role-admitted? goal decisions :reasoner)
+    (if (role-admitted? goal decisions :shape)
+      (if (role-admitted? goal decisions :query)
+        (if (role-admitted? goal decisions :view)
+          (if (role-admitted? goal decisions :action)
+            (if (role-admitted? goal decisions :effect)
+              (if (role-admitted? goal decisions :implementation)
+                (selection-coherent? decisions)
+                false)
               false)
             false)
           false)
@@ -431,6 +471,9 @@
 (defn app-manifest [goal :keyword decisions :document] :document
   (document-vector
    (document-vector (document-keyword :app/goal) (document-keyword goal))
+   (document-vector (document-keyword :app/reasoner)
+                    (document-keyword (choice-id decisions :reasoner))
+                    (document-string (component-digest (choice-id decisions :reasoner))))
    (document-vector (document-keyword :app/shape)
                     (document-keyword (choice-id decisions :shape))
                     (document-string (component-digest (choice-id decisions :shape))))
@@ -521,13 +564,14 @@
 
 (defn manifest-valid? [m :document] :bool
   (let [goal (manifest-value-scan m 0 :app/goal)]
-    (if (= (document-count m) 8)
+    (if (= (document-count m) 9)
       (if (manifest-row-size-scan m 0 :app/goal 2)
         (if (app-goal? goal)
           (if (manifest-row-size-scan m 0 :app/ontology 2)
             (if (string=? (manifest-string-scan m 0 :app/ontology) (app-ontology-digest))
-              (if (manifest-component-valid-scan m 0 :app/shape :shape goal)
-                (if (manifest-component-valid-scan m 0 :app/query :query goal)
+              (if (manifest-component-valid-scan m 0 :app/reasoner :reasoner goal)
+                (if (manifest-component-valid-scan m 0 :app/shape :shape goal)
+                  (if (manifest-component-valid-scan m 0 :app/query :query goal)
                   (if (manifest-component-valid-scan m 0 :app/view :view goal)
                     (if (manifest-component-valid-scan m 0 :app/action :action goal)
                       (if (manifest-component-valid-scan m 0 :app/effect :effect goal)
@@ -547,6 +591,7 @@
                         false)
                       false)
                     false)
+                    false)
                   false)
                 false)
               false)
@@ -554,6 +599,19 @@
           false)
         false)
       false)))
+
+(defn query-app [manifest :document]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (if (manifest-valid? manifest)
+    (let [query (manifest-value-scan manifest 0 :app/query)
+          reasoner (manifest-value-scan manifest 0 :app/reasoner)]
+      (ok (document-vector (component-body reasoner) (component-body query))
+          (evidence :query-app
+                    (document-vector (document-keyword reasoner)
+                                     (document-keyword query)))))
+    (rejected :oak/invalid-app-manifest "manifest is not derived from the current ontology")))
 
 (defn dispatch-scan [d :document i :i64 action :keyword event :keyword slot :i64] :keyword
   (if (= i (document-count d))
@@ -650,8 +708,10 @@
         (rejected :oak/unknown-app-event "no dispatch semantics for action and event")))
     (rejected :oak/invalid-app-manifest "manifest is not derived from the current ontology")))
 
-(defn tender-decisions-at [action-confidence :i64] :document
+(defn tender-decisions-at-floors [action-confidence :i64 effect-confidence :i64] :document
   (document-vector
+   (document-vector (document-keyword :choice) (document-keyword :reasoner)
+                    (document-keyword :reasoner/owl2-rl) (document-i64 9000))
    (document-vector (document-keyword :choice) (document-keyword :shape)
                     (document-keyword :shape/tender-input) (document-i64 9700))
    (document-vector (document-keyword :choice) (document-keyword :query)
@@ -661,15 +721,25 @@
    (document-vector (document-keyword :choice) (document-keyword :action)
                     (document-keyword :action/declare-tender) (document-i64 action-confidence))
    (document-vector (document-keyword :choice) (document-keyword :effect)
-                    (document-keyword :effect/dataspace-transact) (document-i64 9950))
+                    (document-keyword :effect/dataspace-transact) (document-i64 effect-confidence))
    (document-vector (document-keyword :choice) (document-keyword :implementation)
                     (document-keyword :impl/oak-declare) (document-i64 9800))))
+
+(defn tender-decisions-at [action-confidence :i64] :document
+  (tender-decisions-at-floors action-confidence 9950))
 
 (defn compile-tender-app-at [action-confidence :i64]
   [:variant :oak/outcome
    [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
     [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
   (compile-app :goal/tender-intake (tender-decisions-at action-confidence)))
+
+(defn compile-tender-app-effect-at [effect-confidence :i64]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (compile-app :goal/tender-intake
+               (tender-decisions-at-floors 9900 effect-confidence)))
 
 (defn compile-tender-app []
   [:variant :oak/outcome

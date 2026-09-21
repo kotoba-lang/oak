@@ -1,0 +1,62 @@
+(ns bin.semantic-conformance
+  "Compile OaK and run the real OWL2-RL + SPARQL + trained OpenJev path.
+
+  Missing engine/model inputs exit 2: an unmeasured integration is not a
+  passing integration."
+  (:require [clojure.string :as str]
+            ["node:child_process" :as child]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]))
+
+(def root (.cwd js/process))
+(def env (.-env js/process))
+(def kernel (.join path root "src" "oak" "kernel.kotoba"))
+(def policy (.join path root "src" "oak" "policy.edn"))
+(def amu (or (aget env "AMU") "amu"))
+(def classpath (aget env "OAK_SEMANTIC_CLASSPATH"))
+(def python (aget env "OPEN_JEV_PYTHON"))
+(def model-src (aget env "OPEN_JEV_SRC"))
+(def model (aget env "OPEN_JEV_MODEL"))
+(def revision (aget env "OPEN_JEV_REVISION"))
+
+(doseq [[name value] [["OAK_SEMANTIC_CLASSPATH" classpath]
+                      ["OPEN_JEV_PYTHON" python]
+                      ["OPEN_JEV_SRC" model-src]
+                      ["OPEN_JEV_MODEL" model]
+                      ["OPEN_JEV_REVISION" revision]]]
+  (when (str/blank? value)
+    (println "REFUSING to report semantic conformance: missing" name)
+    (.exit js/process 2)))
+
+(def out (.join path (.mkdtempSync fs (.join path (.tmpdir os) "oak-semantic-")) "oak.wasm"))
+(def compiled
+  (.spawnSync child amu
+              (clj->js ["compile" kernel "--jvm-free" "--target" "wasm32-browser"
+                        "--fuel" "16384" "--policy" policy "--output" out])
+              #js {:cwd root :encoding "utf8"}))
+
+(when-not (zero? (or (.-status compiled) 1))
+  (println "REFUSING to report semantic conformance: OaK did not compile")
+  (println (or (.-stdout compiled) "") (or (.-stderr compiled) ""))
+  (.exit js/process 2))
+
+(def host
+  (let [candidate (.join path (or (aget env "AMU_ROOT") "") "runtime" "browser-host.mjs")]
+    (if (.existsSync fs candidate)
+      candidate
+      (do (println "REFUSING to report semantic conformance: AMU_ROOT/browser-host.mjs missing")
+          (.exit js/process 2)))))
+
+(def result
+  (.spawnSync child "kbb"
+              (clj->js ["--backend" "sci" "--classpath" classpath
+                        (.join path root "test" "semantic-conformance.cljk")])
+              #js {:cwd root :stdio "inherit"
+                   :env (js/Object.assign
+                         #js {} js/process.env
+                         #js {"OAK_WASM" out
+                              "OAK_BROWSER_HOST" (str "file://" host)})}))
+
+(when (.-error result) (throw (.-error result)))
+(.exit js/process (or (.-status result) 70))

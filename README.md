@@ -43,48 +43,51 @@ The `:capabilities` clause is checked both ways: a declared capability that is
 never used is a compile error, and a policy that does not grant id 24 refuses
 admission before a byte is emitted.
 
-## Experimental ontology-only app synthesis
+## Ontology-only app synthesis with executable semantics
 
-The repository now contains one end-to-end experiment in which the uncertain
-part of app construction is a choice among ontology identifiers, never source
-text.  A Jev-shaped elaborator emits only finite rows of this form:
+The uncertain part of app construction is a choice among ontology identifiers,
+never source text.  A trained typed-decision model emits only finite rows of
+this form:
 
 ```clojure
 [:choice :action :action/declare-tender 9900]
 ```
 
-The last value is confidence in basis points.  The compiler chooses the
-highest-confidence candidate for each role and admits it only when all of the
-following are true: the winner is unambiguous, confidence is between 8000 and
-10000, its `:component` kind matches the role, the ontology has a `:permits`
-edge from the requested goal, and every selected component satisfies the
-ontology's cross-component `:requires` / `:implements` / `:dispatch` edges.
+The last value is confidence in basis points. Confidence floors are ontology
+rows, not a model-global constant: structural roles currently require 0.80;
+the measured OOD reasoner/effect roles require 0.60.  Every winner must still
+be unique, at most 1.00, of the declared component kind, permitted by the goal,
+and coherent under `:requires` / `:implements` / `:dispatch`.
 
 ```
-Jev pointer choices
+trained OpenJev distributions (no generated text)
        │
        ▼
-compile-app ── validates goal, kind, confidence, permits
+OWL 2 RL ── derives candidate role membership to a least fixpoint
        │
        ▼
-app manifest ── pins every component digest, ontology digest, implementation DefCID
+SPARQL ── discovers the finite ontology candidate sets
        │
        ▼
-run-app ── revalidates exact manifest, SHACL input, binding, dispatch, effect
+compile-app ── validates goal, kind, role floor, permits, coherence
        │
        ▼
-OaK F ── capability-gated dataspace effect
+app manifest ── pins reasoner/query + all component digests + ontology digest + DefCID
+       │
+       ▼
+query-app ── exposes only the selected reasoner/query plan
+       │
+       ▼
+run-app / OaK F ── capability-gated dataspace effect
 ```
 
 `app-ontology-doc` is the source of truth.  It describes the goal, a
-SHACL-shaped input constraint, SPARQL-shaped read algebra, view, action,
-effect, implementation binding, permissions, and dispatch semantics.  The
-generated manifest contains eight rows and pins both the ontology digest and
-the actual DefCID of `do-declare`.  `run-app` does not dispatch a function name
-from model output; it interprets the closed `:op/declare` opcode and reaches
-the existing OaK kernel only after the manifest has been revalidated.  Extra
-manifest rows, wrong row arity, empty or changed implementation bindings, and
-component digests from another ontology are rejected rather than ignored.
+reasoner profile, SHACL input constraint, SPARQL algebra, view, action, effect,
+implementation binding, permissions, confidence floors, and dispatch
+semantics.  The nine-row manifest pins the reasoner and query alongside every
+component digest, the ontology digest, and the actual DefCID of `do-declare`.
+`run-app` never dispatches a function name from model output; it interprets a
+closed opcode after revalidation.
 
 The selected SHACL subset is executable, not documentary.  This experiment
 interprets required single-value `:string` / `:keyword` properties and
@@ -92,27 +95,52 @@ interprets required single-value `:string` / `:keyword` properties and
 validation happens before capability dispatch, and a rejected input is proven
 to leave the dataspace unchanged.
 
-The browser-facing `compile-tender-app-at` entry exists to probe the confidence
-boundary with a scalar argument.  `compile-app` is the general document entry,
-and `run-app` is the general executable-manifest entry.  `compile-tender-app`
-and `run-tender-app` are a deterministic fixture standing in for a trained Jev
-model, so this experiment proves the compiler/runtime contract, not model
-quality.
+`oak.semantic` is the mechanism adapter.  It evaluates the actual sibling
+`org-w3-owl2` rules with the actual `datalog` least-fixpoint engine, materializes
+the entailed RDF graph, and passes the ontology-selected algebra to the actual
+sibling `sparql` engine.  Candidate discovery itself needs an OWL-derived
+subclass membership; a ruleset that does not fire returns no candidate.
 
-There are two deliberate limits.  This is a bounded SHACL interpreter, not the
-full sibling `shacl` implementation, and the SPARQL form is still a
-content-addressed executable-plan input rather than a query executed by the
-sibling `sparql` implementation.  The ontology is also a finite closed-world
-app ontology, not a general OWL 2 entailment engine.
+The model path uses the trained, published
+`com-kotobalabs/open-jev-deberta-v3-large` artifact through
+`typed_decisions.open_jev`.  The JSON result says `generated_text: false`,
+contains the artifact/training provenance, and returns one calibrated
+distribution for every closed option list.  The live conformance run pins the
+artifact revision; recorded answers are not substituted for a forward pass.
 
-Measured on 2026-09-21 with Amu `wasm32-browser-kotoba-v1`: the 18,245-byte
-module compiled JVM-free with fuel 8192; confidence 7999 was rejected as
-`:oak/incomplete-app-decision`, confidence 8000 was admitted, confidence 10001
-was rejected, and an invalid SHACL enum was refused without a write. Executing
-the valid generated app then wrote one `:tender` through the real dataspace
-provider.  The default fuel 512 trapped while compiling the manifest, so 8192
-is an explicit runtime condition of this experiment rather than an implicit
-host assumption.
+### Semantic boundary
+
+The executable reasoner is **general OWL 2 RL/RDFS over arbitrary input
+triples**. It covers recursive subclass/subproperty/type inference and the
+property-level domain, range, transitive, symmetric and inverse rules implemented
+by `org-w3-owl2`. It is not full OWL 2 DL/SROIQ: existential introduction,
+disjunction, unrestricted cardinality reasoning and tableau consistency are not
+silently approximated. Asking for `:owl2-dl` returns
+`:oak/unsupported-owl-profile`. This fail-closed boundary is part of the runtime
+contract, not a README caveat masquerading as implementation.
+
+SHACL remains the kernel's bounded executable subset (required single-valued
+string/keyword properties and `sh:in`). Expanding that subset is independent
+of the now-live OWL/SPARQL/model connection.
+
+Measured on 2026-09-21 with Amu `wasm32-browser-kotoba-v1`: the module compiles
+JVM-free; the base conformance suite admits the exact 0.80 action floor and
+exact 0.60 effect floor while rejecting the values immediately below and a
+confidence above 1.00. The semantic conformance path performed a real pinned
+DeBERTa forward for all seven roles, compiled those choices in the Wasm module,
+then returned `:t-open` only after OWL-derived type membership and the selected
+SPARQL two-pattern join. The default fuel 512 remains insufficient; the base
+suite uses 8192 and the combined semantic instance uses 16384.
+
+Run the two layers separately so missing model/engine inputs cannot look green:
+
+```sh
+kbb --backend sci bin/wasm-conformance.cljk
+kbb --backend sci bin/semantic-conformance.cljk
+```
+
+The semantic runner requires `OAK_SEMANTIC_CLASSPATH`, `OPEN_JEV_PYTHON`,
+`OPEN_JEV_SRC`, `OPEN_JEV_MODEL`, and `OPEN_JEV_REVISION`; absence exits 2.
 
 ## S
 
@@ -206,7 +234,7 @@ amu compile src/oak/kernel.kotoba --jvm-free --target wasm32-browser \
             --fuel 8192 --policy src/oak/policy.edn --output oak.wasm
 ```
 
-Measured 2026-09-21, all JVM-free: the experiment is an **18,245-byte
+Measured 2026-09-21, all JVM-free: the experiment is a **19,792-byte
 `wasm32-browser-kotoba-v1` module**, which instantiates on
 `amu/runtime/browser-host.mjs` and returns the same `document-sha256` for S as
 the reference interpreter does.

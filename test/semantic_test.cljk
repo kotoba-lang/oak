@@ -1,0 +1,36 @@
+(ns semantic-test
+  (:require [cljs.test :refer [deftest is run-tests testing]]
+            [oak.semantic :as semantic]))
+
+(deftest owl2-rl-and-sparql-compose
+  (let [triples [(semantic/triple :procurement :rdfs/subClassOf :tender)
+                 (semantic/triple :t-open :rdf/type :procurement)
+                 (semantic/triple :t-open :status :open)
+                 (semantic/triple :t-closed :rdf/type :tender)
+                 (semantic/triple :t-closed :status :closed)]
+        plan [:sparql/project [:?t]
+              [:sparql/bgp [:?t :rdf/type :tender]
+               [:?t :status :open]]]]
+    (is (= [{'?t :t-open}]
+           (semantic/execute :owl2-rl plan triples))
+        "the answer needs both derived OWL type and SPARQL BGP join")))
+
+(deftest unsupported-owl-profile-is-not-approximated
+  (testing "OWL 2 DL cannot silently run as RL"
+    (try
+      (semantic/materialize :owl2-dl [])
+      (is false "expected a refusal")
+      (catch :default e
+        (is (= :oak/unsupported-owl-profile (:code (ex-data e))))))))
+
+(deftest candidates-come-through-owl-entailment
+  (let [ontology [[:goal :goal/x]
+                  [:component :query/good :query [:sparql/bgp]]
+                  [:permits :goal/x :query :query/good]]
+        candidates (semantic/candidates-for-role ontology :goal/x :query)]
+    (is (= [{:id :query/good :permitted? true}] candidates))))
+
+(defmethod cljs.test/report [:cljs.test/default :end-run-tests] [m]
+  (set! (.-exitCode js/process) (if (cljs.test/successful? m) 0 1)))
+
+(run-tests)
