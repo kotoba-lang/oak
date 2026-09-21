@@ -74,7 +74,10 @@
   ;; `do-declare`, no `assert!` wrapper, no schema mutator.
   (check "the kernel exports its entry, its doors, its digest, and main"
          (= #{'main 'schema-digest 'oak-call
-              'call-declare 'call-relate 'call-related 'call-census}
+              'call-declare 'call-relate 'call-related 'call-census
+              'app-ontology-digest 'compile-app 'run-app
+              'compile-tender-app-at 'compile-tender-app
+              'run-tender-app-event 'run-tender-app}
             exports)
          exports)
   (check "nothing that touches the graph without admission is exported"
