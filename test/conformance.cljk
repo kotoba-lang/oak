@@ -75,8 +75,8 @@
   (check "the kernel exports its entry, its doors, its digest, and main"
          (= #{'main 'schema-digest 'oak-call
               'call-declare 'call-relate 'call-related 'call-census
-              'app-ontology-digest 'compile-app 'run-app
-              'compile-tender-app-at 'compile-tender-app
+              'app-ontology 'app-ontology-digest 'compile-app 'query-app 'run-app
+              'compile-tender-app-at 'compile-tender-app-effect-at 'compile-tender-app
               'run-tender-app-event 'run-tender-app}
             exports)
          exports)

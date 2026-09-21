@@ -30,6 +30,37 @@
         candidates (semantic/candidates-for-role ontology :goal/x :query)]
     (is (= [{:id :query/good :permitted? true}] candidates))))
 
+(deftest ontology-shape-plan-translates-to-the-shacl-engine-abi
+  (is (= {:target :tender
+          :shape {:shacl/type :node-shape
+                  :property [{:path :id :datatype :string
+                              :min-count 1 :max-count 1}
+                             {:path :status :datatype :keyword
+                              :min-count 1 :max-count 1
+                              :in [:open :closed]}]}}
+         (semantic/shape-plan->shacl
+          [:shacl/node :tender
+           [:shacl/property :id :string 1 1]
+           [:shacl/property :status :keyword 1 1
+            [:shacl/in :open :closed]]]))))
+
+(deftest unsupported-shacl-constraints-are-not-ignored
+  (try
+    (semantic/shape-plan->shacl
+     [:shacl/node :tender
+      [:shacl/property :id :string 1 1 [:shacl/pattern "T-[0-9]+"]]])
+    (is false "expected a refusal")
+    (catch :default e
+      (is (= :oak/unsupported-shacl-constraint (:code (ex-data e)))))))
+
+(deftest unknown-shacl-datatypes-cannot-reach-the-engine-default
+  (try
+    (semantic/shape-plan->shacl
+     [:shacl/node :tender [:shacl/property :id :future-datatype 1 1]])
+    (is false "expected a refusal")
+    (catch :default e
+      (is (= :oak/invalid-shacl-property-operands (:code (ex-data e)))))))
+
 (defmethod cljs.test/report [:cljs.test/default :end-run-tests] [m]
   (set! (.-exitCode js/process) (if (cljs.test/successful? m) 0 1)))
 

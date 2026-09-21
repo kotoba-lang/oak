@@ -22,7 +22,7 @@
                              (host-doc->edn (aget entry 1))]) payload))
       "keyword" (keyword (subs payload 1))
       "symbol" (symbol payload)
-      "i64" payload
+      "i64" (js/Number payload)
       "f64" payload
       "string" payload
       "bool" payload
@@ -37,6 +37,9 @@
     (boolean? value) #js ["bool" value]
     (nil? value) #js ["null"]
     (vector? value) #js ["vector" (clj->js (mapv edn->raw-doc value))]
+    (map? value) #js ["map" (clj->js
+                              (mapv (fn [[k v]] #js [(edn->raw-doc k) (edn->raw-doc v)])
+                                    (sort-by (comp str key) value)))]
     :else (throw (ex-info "cannot encode semantic input as a Kotoba document"
                           {:value value}))))
 
@@ -80,9 +83,12 @@
                              :input request :encoding "utf8"
                              :env (js/Object.assign
                                    #js {} js/process.env
-                                   #js {"PYTHONPATH" (aget env "OPEN_JEV_SRC")})})]
+                                   #js {"PYTHONPATH" (aget env "OPEN_JEV_PYTHONPATH")})})]
     (when-not (zero? (or (.-status run) 1))
       (throw (ex-info "trained OpenJev forward failed"
+                      {:status (.-status run) :stderr (.-stderr run)})))
+    (when (str/blank? (.-stdout run))
+      (throw (ex-info "trained OpenJev forward produced no JSON"
                       {:status (.-status run) :stderr (.-stderr run)})))
     (js->clj (.parse js/JSON (str/trim (.-stdout run))) :keywordize-keys true)))
 
@@ -151,16 +157,42 @@
              (.then
               (fn [{:keys [semantic-plan]}]
                 (when semantic-plan
-                  (let [[reasoner plan] semantic-plan
+                  (let [[reasoner shape-plan plan] semantic-plan
                         profile (second reasoner)
                         triples [(semantic/triple :procurement :rdfs/subClassOf :tender)
                                  (semantic/triple :t-open :rdf/type :procurement)
                                  (semantic/triple :t-open :status :open)
                                  (semantic/triple :t-closed :rdf/type :tender)
                                  (semantic/triple :t-closed :status :closed)]
-                        rows (semantic/execute profile plan triples)]
+                        rows (semantic/execute profile plan triples)
+                        {:keys [target shape]} (semantic/shape-plan->shacl shape-plan)
+                        valid-node {:id "t-live" :status :open}
+                        invalid-node {:id "t-bad" :status :unknown}
+                        shacl-wasm (.readFileSync fs (aget env "OAK_SHACL_WASM"))]
                     (check "selected OWL2 reasoner plus selected SPARQL returns the inferred open tender"
-                           (= [{'?t :t-open}] rows) rows)))))
+                           (= [{'?t :t-open}] rows) rows)
+                    (check "selected SHACL plan targets the dispatched ontology type"
+                           (= :tender target) target)
+                    (-> ((.-instantiateKotoba host) shacl-wasm #js {})
+                        (.then
+                         (fn [shacl-runtime]
+                           (let [exports (.-exports (.-instance shacl-runtime))
+                                 document (.-document (.-typedValues shacl-runtime))
+                                 validate (aget exports "validate")
+                                 encoded-shape (document (edn->raw-doc shape))
+                                 valid-result (host-doc->edn
+                                               (validate encoded-shape
+                                                         (document (edn->raw-doc valid-node))))
+                                 invalid-result (host-doc->edn
+                                                 (validate encoded-shape
+                                                           (document (edn->raw-doc invalid-node))))]
+                             (check "actual SHACL Wasm accepts the ontology-valid input"
+                                    (true? (:valid? valid-result)) valid-result)
+                             (check "actual SHACL Wasm rejects the ontology-invalid enum"
+                                    (and (false? (:valid? invalid-result))
+                                         (= [:shacl/in]
+                                            (mapv :error (:errors invalid-result))))
+                                    invalid-result)))))))))
              (.then
               (fn [_]
                 (println (str "\noak semantic path: "

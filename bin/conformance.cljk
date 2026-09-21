@@ -60,7 +60,7 @@
   (.spawnSync child "nbb"
               (clj->js ["--classpath" (or (aget (.-env js/process) "OAK_CLASSPATH")
                                           (sibling-classpath))
-                        (.join path root "test" "conformance.cljs")])
+                        (.join path root "test" "conformance.cljk")])
               #js {:cwd root
                    :stdio "inherit"
                    :env (js/Object.assign

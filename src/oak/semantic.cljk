@@ -2,16 +2,21 @@
   "Mechanism adapters for OaK's ontology-authored semantics.
 
   The application decisions stay in `kernel.kotoba`.  This namespace binds
-  two existing portable engines to the plans the Kotoba runtime exports:
-  `org-w3-owl2`'s OWL 2 RL rules evaluated by `datalog`, then `sparql` over
-  the materialized RDF graph.  It never interprets source text and it refuses
-  profiles outside the engine's proved semantics."
+  existing portable engines to the plans the Kotoba runtime exports:
+  `org-w3-owl2`'s OWL 2 RL rules evaluated by `datalog`, `sparql` over the
+  materialized RDF graph, and the sovereign `kotoba-lang/shacl` Wasm validator
+  over the selected input shape.  It never interprets generated source text
+  and it refuses operators outside the engines' proved semantics."
   (:require [datalog.core :as datalog]
             [datom.source :as source]
             [owl.rules :as owl]
             [sparql.core :as sparql]))
 
 (def supported-owl-profile :owl2-rl)
+(def supported-shacl-property-constraints
+  #{:shacl/in})
+(def supported-shacl-datatypes
+  #{:string :number :integer :boolean :keyword :map :vector})
 
 (defn triple [s p o] {:s s :p p :o o})
 
@@ -87,6 +92,57 @@
         quads (map (fn [{:keys [s p o]}]
                      {:subject s :predicate p :object o}) graph)]
     (sparql/select (plan->algebra plan) quads)))
+
+(defn- shacl-constraint->entry [constraint]
+  (case (first constraint)
+    :shacl/in [:in (vec (rest constraint))]
+    (throw (ex-info "unsupported ontology SHACL property constraint"
+                    {:code :oak/unsupported-shacl-constraint
+                     :constraint (first constraint)
+                     :supported supported-shacl-property-constraints}))))
+
+(defn- property-plan->shacl [property]
+  (when-not (and (vector? property)
+                 (= :shacl/property (first property))
+                 (<= 5 (count property)))
+    (throw (ex-info "invalid ontology SHACL property plan"
+                    {:code :oak/invalid-shacl-property-plan
+                     :property property})))
+  (let [[_ path datatype min-count max-count & constraints] property]
+    (when-not (and (keyword? path)
+                   (keyword? datatype)
+                   (contains? supported-shacl-datatypes datatype)
+                   (integer? min-count)
+                   (integer? max-count)
+                   (<= 0 min-count max-count))
+      (throw (ex-info "invalid ontology SHACL property operands"
+                      {:code :oak/invalid-shacl-property-operands
+                       :property property})))
+    (when-not (= (count constraints) (count (set (map first constraints))))
+      (throw (ex-info "duplicate ontology SHACL property constraint"
+                      {:code :oak/duplicate-shacl-constraint
+                       :property property})))
+    (into {:path path
+           :datatype datatype
+           :min-count min-count
+           :max-count max-count}
+          (map shacl-constraint->entry constraints))))
+
+(defn shape-plan->shacl
+  "Translate the closed OaK shape plan to `kotoba-lang/shacl`'s canonical
+  document ABI.  The target is returned separately because validation of a
+  concrete node does not need RDF target discovery.  Unknown rows and
+  constraints are rejected rather than ignored."
+  [plan]
+  (when-not (and (vector? plan)
+                 (= :shacl/node (first plan))
+                 (keyword? (second plan)))
+    (throw (ex-info "invalid ontology SHACL node plan"
+                    {:code :oak/invalid-shacl-node-plan
+                     :plan plan})))
+  {:target (second plan)
+   :shape {:shacl/type :node-shape
+           :property (mapv property-plan->shacl (drop 2 plan))}})
 
 (defn ontology->rdf
   "Project OaK ontology rows into RDF for candidate discovery.

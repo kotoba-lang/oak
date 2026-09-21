@@ -606,10 +606,14 @@
     [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
   (if (manifest-valid? manifest)
     (let [query (manifest-value-scan manifest 0 :app/query)
-          reasoner (manifest-value-scan manifest 0 :app/reasoner)]
-      (ok (document-vector (component-body reasoner) (component-body query))
+          reasoner (manifest-value-scan manifest 0 :app/reasoner)
+          shape (manifest-value-scan manifest 0 :app/shape)]
+      (ok (document-vector (component-body reasoner)
+                           (component-body shape)
+                           (component-body query))
           (evidence :query-app
                     (document-vector (document-keyword reasoner)
+                                     (document-keyword shape)
                                      (document-keyword query)))))
     (rejected :oak/invalid-app-manifest "manifest is not derived from the current ontology")))
 
