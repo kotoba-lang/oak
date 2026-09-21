@@ -193,6 +193,10 @@
             (call "compile-tender-app-at" (js/BigInt 8000)))
           (fn [_] (println "PROBE confidence above valid range")
             (call "compile-tender-app-at" (js/BigInt 10001)))
+          (fn [_] (println "PROBE ontology effect floor below boundary")
+            (call "compile-tender-app-effect-at" (js/BigInt 5999)))
+          (fn [_] (println "PROBE ontology effect floor at boundary")
+            (call "compile-tender-app-effect-at" (js/BigInt 6000)))
           (fn [_] (println "PROBE unknown ontology event")
             (call "run-tender-app-event" ":event/delete" "t-unknown" ":open"))
           (fn [_] (println "PROBE invalid SHACL enum")
@@ -207,16 +211,17 @@
             (call "app-ontology-digest"))]))
 
 (defn- report-synthesis [r]
-  (let [[compiled below at-boundary above unknown invalid before executed census ontology-digest] r
+  (let [[compiled below at-boundary above effect-below effect-boundary
+         unknown invalid before executed census ontology-digest] r
         manifest-host (second compiled)
         manifest (host->kir-doc manifest-host)
         ontology-row (tagged-row manifest :app/ontology)
         implementation-row (tagged-row manifest :app/implementation)
         ontology-in-manifest (second (second (tagged-vector-items ontology-row)))
         implementation-binding (second (nth (tagged-vector-items implementation-row) 3))]
-    (check "ontology-only decisions compile to an eight-row app manifest"
+    (check "ontology-only decisions compile to a nine-row app manifest"
            (and (= :ok (first compiled))
-                (= 8 (count (tagged-vector-items manifest))))
+                (= 9 (count (tagged-vector-items manifest))))
            manifest)
     (check "the manifest pins the ontology digest used by the compiler"
            (= ontology-digest ontology-in-manifest)
@@ -236,6 +241,13 @@
            (= [:rejected :oak/incomplete-app-decision]
               (subvec above 0 2))
            above)
+    (check "a trained choice below the ontology's 0.60 effect floor is refused"
+           (= [:rejected :oak/incomplete-app-decision]
+              (subvec effect-below 0 2))
+           effect-below)
+    (check "the ontology's exact 0.60 effect floor is admitted"
+           (= :ok (first effect-boundary))
+           effect-boundary)
     (check "an event without ontology dispatch semantics is refused by name"
            (= [:rejected :oak/unknown-app-event]
               (subvec unknown 0 2))

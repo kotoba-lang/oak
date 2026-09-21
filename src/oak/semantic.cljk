@@ -1,0 +1,134 @@
+(ns oak.semantic
+  "Mechanism adapters for OaK's ontology-authored semantics.
+
+  The application decisions stay in `kernel.kotoba`.  This namespace binds
+  two existing portable engines to the plans the Kotoba runtime exports:
+  `org-w3-owl2`'s OWL 2 RL rules evaluated by `datalog`, then `sparql` over
+  the materialized RDF graph.  It never interprets source text and it refuses
+  profiles outside the engine's proved semantics."
+  (:require [datalog.core :as datalog]
+            [datom.source :as source]
+            [owl.rules :as owl]
+            [sparql.core :as sparql]))
+
+(def supported-owl-profile :owl2-rl)
+
+(defn triple [s p o] {:s s :p p :o o})
+
+(defn- rule-query [db rules query]
+  (datalog/q db (assoc query :rules rules) (constantly true)))
+
+(defn materialize-owl2-rl
+  "Materialize the RDFS/OWL 2 RL Horn closure of arbitrary triples.
+
+  This is general over the input graph, not tailored to the tender fixture.
+  `owl.rules/triple-rules` owns the supported semantics; the Datalog engine
+  evaluates them to a least fixpoint."
+  [triples]
+  (let [db (source/of-quads (set triples))
+        rules (owl/triple-rules)
+        derived-triples (rule-query db rules
+                                    '{:find [?s ?p ?o]
+                                      :where [(owl-triple ?s ?p ?o)]})
+        derived-types (rule-query db rules
+                                  '{:find [?s ?c]
+                                    :where [(owl-type ?s ?c)]})]
+    (into (set triples)
+          (concat (map (fn [[s p o]] (triple s p o)) derived-triples)
+                  (map (fn [[s c]] (triple s :rdf/type c)) derived-types)))))
+
+(defn materialize
+  "Run a named OWL profile or fail closed.  Full OWL 2 DL/SROIQ is not
+  silently approximated by RL."
+  [profile triples]
+  (if (= profile supported-owl-profile)
+    (materialize-owl2-rl triples)
+    (throw (ex-info "OaK has no qualified engine for the requested OWL profile"
+                    {:code :oak/unsupported-owl-profile
+                     :requested profile
+                     :supported supported-owl-profile}))))
+
+(defn- logic-var [x]
+  (if (and (keyword? x) (.startsWith (name x) "?"))
+    (symbol (name x))
+    x))
+
+(defn- triple-pattern [pattern]
+  (mapv logic-var pattern))
+
+(defn plan->algebra
+  "Translate the closed ontology plan representation to `sparql.core`'s EDN
+  algebra.  Unknown operators are rejected instead of becoming empty plans."
+  [plan]
+  (case (first plan)
+    :sparql/bgp
+    {:sparql/op :bgp :patterns (mapv triple-pattern (rest plan))}
+
+    :sparql/project
+    {:sparql/op :project
+     :vars (mapv logic-var (second plan))
+     :pattern (plan->algebra (nth plan 2))}
+
+    :sparql/distinct
+    {:sparql/op :distinct :pattern (plan->algebra (second plan))}
+
+    :sparql/slice
+    {:sparql/op :slice :offset (second plan) :limit (nth plan 2)
+     :pattern (plan->algebra (nth plan 3))}
+
+    (throw (ex-info "unsupported ontology SPARQL operator"
+                    {:code :oak/unsupported-sparql-operator
+                     :operator (first plan)}))))
+
+(defn execute
+  "OWL materialization followed by the real sibling SPARQL engine."
+  [profile plan triples]
+  (let [graph (materialize profile triples)
+        quads (map (fn [{:keys [s p o]}]
+                     {:subject s :predicate p :object o}) graph)]
+    (sparql/select (plan->algebra plan) quads)))
+
+(defn ontology->rdf
+  "Project OaK ontology rows into RDF for candidate discovery.
+
+  Each component is typed through a role-specific implementation class, so
+  querying the role only succeeds if OWL subclass entailment actually ran."
+  [ontology]
+  (let [components (filter #(= :component (first %)) ontology)
+        roles (set (map #(nth % 2) components))]
+    (into
+     (set
+      (mapcat (fn [role]
+                (let [impl-class (keyword "oak.role" (str (name role) "-implementation"))]
+                  [(triple impl-class :rdfs/subClassOf role)
+                   (triple role :rdfs/subClassOf :oak/component)]))
+              roles))
+     (concat
+      (map (fn [[_ id role]]
+             (triple id :rdf/type
+                     (keyword "oak.role" (str (name role) "-implementation"))))
+           components)
+      (keep (fn [row]
+              (when (= :permits (first row))
+                (triple (second row) :oak/permits (nth row 3))))
+            ontology)))))
+
+(defn candidates-for-role
+  "Discover role candidates by OWL entailment plus SPARQL, and report whether
+  each is permitted for the goal."
+  [ontology goal role]
+  (let [graph (materialize supported-owl-profile (ontology->rdf ontology))
+        quads (map (fn [{:keys [s p o]}]
+                     {:subject s :predicate p :object o}) graph)
+        rows (sparql/select
+              {:sparql/op :project
+               :vars ['?candidate]
+               :pattern {:sparql/op :bgp
+                         :patterns [['?candidate :rdf/type role]]}}
+              quads)
+        permitted (set (map :o (filter #(and (= goal (:s %))
+                                             (= :oak/permits (:p %))) graph)))]
+    (mapv (fn [row]
+            (let [id (get row '?candidate)]
+              {:id id :permitted? (contains? permitted id)}))
+          rows)))
