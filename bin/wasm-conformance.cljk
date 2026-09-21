@@ -36,7 +36,7 @@
 (def compiled
   (.spawnSync child amu
               (clj->js ["compile" kernel "--jvm-free" "--target" "wasm32-browser"
-                        "--fuel" "8192" "--policy" policy "--output" out])
+                        "--fuel" "16384" "--policy" policy "--output" out])
               #js {:cwd root :encoding "utf8"}))
 
 (when-not (zero? (or (.-status compiled) 1))
