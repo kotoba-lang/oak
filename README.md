@@ -75,7 +75,7 @@ compile-app ── validates goal, kind, role floor, permits, coherence
 app manifest ── pins reasoner/query + all component digests + ontology digest + DefCID
        │
        ▼
-query-app ── exposes only the selected reasoner/query plan
+query-app ── exposes the selected reasoner/shape/query plans
        │
        ▼
 run-app / OaK F ── capability-gated dataspace effect
@@ -93,7 +93,12 @@ The selected SHACL subset is executable, not documentary.  This experiment
 interprets required single-value `:string` / `:keyword` properties and
 `:shacl/in`; the tender status is constrained to `:open` or `:closed`.  Shape
 validation happens before capability dispatch, and a rejected input is proven
-to leave the dataspace unchanged.
+to leave the dataspace unchanged. `query-app` also exports that same closed
+shape plan. `oak.semantic/shape-plan->shacl` translates it fail-closed to the
+canonical document ABI of the sibling `kotoba-lang/shacl` engine, and semantic
+conformance compiles that sovereign `.kotoba` source to a second Wasm module
+and executes both an accepting and a rejecting input through it. Unknown shape
+constraints are rejected by the adapter rather than silently omitted.
 
 `oak.semantic` is the mechanism adapter.  It evaluates the actual sibling
 `org-w3-owl2` rules with the actual `datalog` least-fixpoint engine, materializes
@@ -119,18 +124,23 @@ silently approximated. Asking for `:owl2-dl` returns
 `:oak/unsupported-owl-profile`. This fail-closed boundary is part of the runtime
 contract, not a README caveat masquerading as implementation.
 
-SHACL remains the kernel's bounded executable subset (required single-valued
-string/keyword properties and `sh:in`). Expanding that subset is independent
-of the now-live OWL/SPARQL/model connection.
+SHACL remains a bounded executable subset (minimum/maximum count, canonical
+document datatypes, `sh:in`, and node kind in the sibling engine; the current
+OaK ontology uses count, datatype, and `sh:in`). It is now a live engine
+connection, not a claim of complete SHACL Core. The kernel repeats its narrow
+effect-admission checks so a host cannot bypass validation by omitting the
+sibling preflight.
 
 Measured on 2026-09-21 with Amu `wasm32-browser-kotoba-v1`: the module compiles
 JVM-free; the base conformance suite admits the exact 0.80 action floor and
 exact 0.60 effect floor while rejecting the values immediately below and a
 confidence above 1.00. The semantic conformance path performed a real pinned
 DeBERTa forward for all seven roles, compiled those choices in the Wasm module,
-then returned `:t-open` only after OWL-derived type membership and the selected
-SPARQL two-pattern join. The default fuel 512 remains insufficient; the base
-suite uses 8192 and the combined semantic instance uses 16384.
+returned `:t-open` only after OWL-derived type membership and the selected
+SPARQL two-pattern join, and compiled the sibling SHACL source to Wasm before
+accepting `{:id "t-live" :status :open}` and rejecting the same shape with an
+unknown status. The default fuel 512 remains insufficient; the base suite uses
+8192 and the combined semantic instance uses 16384.
 
 Run the two layers separately so missing model/engine inputs cannot look green:
 
@@ -140,7 +150,10 @@ kbb --backend sci bin/semantic-conformance.cljk
 ```
 
 The semantic runner requires `OAK_SEMANTIC_CLASSPATH`, `OPEN_JEV_PYTHON`,
-`OPEN_JEV_SRC`, `OPEN_JEV_MODEL`, and `OPEN_JEV_REVISION`; absence exits 2.
+`OPEN_JEV_SRC` (repository root or its `src` directory), `OPEN_JEV_MODEL`, and
+`OPEN_JEV_REVISION`; absence exits 2. `SHACL_ROOT` may override the sibling
+`../shacl` checkout. Missing source or a forward that emits no JSON also exits
+2 instead of looking like a semantic pass.
 
 ## S
 
