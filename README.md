@@ -43,6 +43,77 @@ The `:capabilities` clause is checked both ways: a declared capability that is
 never used is a compile error, and a policy that does not grant id 24 refuses
 admission before a byte is emitted.
 
+## Experimental ontology-only app synthesis
+
+The repository now contains one end-to-end experiment in which the uncertain
+part of app construction is a choice among ontology identifiers, never source
+text.  A Jev-shaped elaborator emits only finite rows of this form:
+
+```clojure
+[:choice :action :action/declare-tender 9900]
+```
+
+The last value is confidence in basis points.  The compiler chooses the
+highest-confidence candidate for each role and admits it only when all of the
+following are true: the winner is unambiguous, confidence is between 8000 and
+10000, its `:component` kind matches the role, the ontology has a `:permits`
+edge from the requested goal, and every selected component satisfies the
+ontology's cross-component `:requires` / `:implements` / `:dispatch` edges.
+
+```
+Jev pointer choices
+       │
+       ▼
+compile-app ── validates goal, kind, confidence, permits
+       │
+       ▼
+app manifest ── pins every component digest, ontology digest, implementation DefCID
+       │
+       ▼
+run-app ── revalidates exact manifest, SHACL input, binding, dispatch, effect
+       │
+       ▼
+OaK F ── capability-gated dataspace effect
+```
+
+`app-ontology-doc` is the source of truth.  It describes the goal, a
+SHACL-shaped input constraint, SPARQL-shaped read algebra, view, action,
+effect, implementation binding, permissions, and dispatch semantics.  The
+generated manifest contains eight rows and pins both the ontology digest and
+the actual DefCID of `do-declare`.  `run-app` does not dispatch a function name
+from model output; it interprets the closed `:op/declare` opcode and reaches
+the existing OaK kernel only after the manifest has been revalidated.  Extra
+manifest rows, wrong row arity, empty or changed implementation bindings, and
+component digests from another ontology are rejected rather than ignored.
+
+The selected SHACL subset is executable, not documentary.  This experiment
+interprets required single-value `:string` / `:keyword` properties and
+`:shacl/in`; the tender status is constrained to `:open` or `:closed`.  Shape
+validation happens before capability dispatch, and a rejected input is proven
+to leave the dataspace unchanged.
+
+The browser-facing `compile-tender-app-at` entry exists to probe the confidence
+boundary with a scalar argument.  `compile-app` is the general document entry,
+and `run-app` is the general executable-manifest entry.  `compile-tender-app`
+and `run-tender-app` are a deterministic fixture standing in for a trained Jev
+model, so this experiment proves the compiler/runtime contract, not model
+quality.
+
+There are two deliberate limits.  This is a bounded SHACL interpreter, not the
+full sibling `shacl` implementation, and the SPARQL form is still a
+content-addressed executable-plan input rather than a query executed by the
+sibling `sparql` implementation.  The ontology is also a finite closed-world
+app ontology, not a general OWL 2 entailment engine.
+
+Measured on 2026-09-21 with Amu `wasm32-browser-kotoba-v1`: the 18,245-byte
+module compiled JVM-free with fuel 8192; confidence 7999 was rejected as
+`:oak/incomplete-app-decision`, confidence 8000 was admitted, confidence 10001
+was rejected, and an invalid SHACL enum was refused without a write. Executing
+the valid generated app then wrote one `:tender` through the real dataspace
+provider.  The default fuel 512 trapped while compiling the manifest, so 8192
+is an explicit runtime condition of this experiment rather than an implicit
+host assumption.
+
 ## S
 
 ```clojure
@@ -132,10 +203,10 @@ To compile the kernel rather than interpret it:
 ```sh
 amu check   src/oak/kernel.kotoba --jvm-free --policy src/oak/policy.edn
 amu compile src/oak/kernel.kotoba --jvm-free --target wasm32-browser \
-            --policy src/oak/policy.edn --output oak.wasm
+            --fuel 8192 --policy src/oak/policy.edn --output oak.wasm
 ```
 
-Measured 2026-08-31, all JVM-free: an **8,394-byte
+Measured 2026-09-21, all JVM-free: the experiment is an **18,245-byte
 `wasm32-browser-kotoba-v1` module**, which instantiates on
 `amu/runtime/browser-host.mjs` and returns the same `document-sha256` for S as
 the reference interpreter does.
@@ -150,6 +221,11 @@ kbb --backend sci test/browser-parity.cljk    # OAK_SOURCE / OAK_WASM / OAK_BROW
 kbb --backend sci bin/conformance.cljk         # the reference interpreter
 kbb --backend sci bin/wasm-conformance.cljk    # the same checks, on the wasm module
 ```
+
+The wasm runner requires `OAK_CLASSPATH` to contain `provider/src`, `text/src`,
+and the exact osaho revision pinned by provider.  It refuses with exit 2 when
+that classpath is absent; a nearby osaho checkout is not assumed to be the
+pinned dependency.
 
 The wasm run uses the same `provider.dataspace` the interpreter run does, with
 a bridge either side of it — small, because the host's document form IS the

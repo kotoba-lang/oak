@@ -124,7 +124,7 @@
                                     ((:invoke provider) (host->kir-request request))))})
           (.then (fn [i]
                    (let [ex (.-exports (.-instance i))]
-                     (if (= "schema-digest" f)
+                     (if (contains? #{"schema-digest" "app-ontology-digest"} f)
                        ((aget ex f))
                        (outcome (apply (aget ex f) args))))))))))
 
@@ -173,6 +173,87 @@
            (= digest (aget (first (doc-items (nth census 2))) 1))
            {:digest digest :evidence (mapv vec (doc-items (nth census 2)))})))
 
+(defn- tagged-vector-items [d]
+  (when (= "vector" (first d)) (second d)))
+
+(defn- tagged-row [manifest head]
+  (first
+   (filter (fn [row]
+             (let [items (tagged-vector-items row)]
+               (= ["keyword" head] (first items))))
+           (tagged-vector-items manifest))))
+
+(defn- synthesis-run [call]
+  (steps call
+         [(fn [_] (println "PROBE compile-tender-app")
+            (call "compile-tender-app"))
+          (fn [_] (println "PROBE confidence below boundary")
+            (call "compile-tender-app-at" (js/BigInt 7999)))
+          (fn [_] (println "PROBE confidence at boundary")
+            (call "compile-tender-app-at" (js/BigInt 8000)))
+          (fn [_] (println "PROBE confidence above valid range")
+            (call "compile-tender-app-at" (js/BigInt 10001)))
+          (fn [_] (println "PROBE unknown ontology event")
+            (call "run-tender-app-event" ":event/delete" "t-unknown" ":open"))
+          (fn [_] (println "PROBE invalid SHACL enum")
+            (call "run-tender-app" "t-invalid" ":unknown"))
+          (fn [_] (println "PROBE census after invalid input")
+            (call "call-census" ":tender"))
+          (fn [_] (println "PROBE run-tender-app")
+            (call "run-tender-app" "t-generated" ":open"))
+          (fn [_] (println "PROBE generated census")
+            (call "call-census" ":tender"))
+          (fn [_] (println "PROBE app ontology digest")
+            (call "app-ontology-digest"))]))
+
+(defn- report-synthesis [r]
+  (let [[compiled below at-boundary above unknown invalid before executed census ontology-digest] r
+        manifest-host (second compiled)
+        manifest (host->kir-doc manifest-host)
+        ontology-row (tagged-row manifest :app/ontology)
+        implementation-row (tagged-row manifest :app/implementation)
+        ontology-in-manifest (second (second (tagged-vector-items ontology-row)))
+        implementation-binding (second (nth (tagged-vector-items implementation-row) 3))]
+    (check "ontology-only decisions compile to an eight-row app manifest"
+           (and (= :ok (first compiled))
+                (= 8 (count (tagged-vector-items manifest))))
+           manifest)
+    (check "the manifest pins the ontology digest used by the compiler"
+           (= ontology-digest ontology-in-manifest)
+           {:ontology ontology-digest :manifest ontology-in-manifest})
+    (check "the manifest pins the implementation definition CID"
+           (= "bafyreiggpt55m7ke7qy7f2fxscdo4zq3pnq7gbssvrlqcwp6ofngp66xka"
+              implementation-binding)
+           implementation-binding)
+    (check "a Jev choice below the 0.80 confidence boundary is refused by name"
+           (= [:rejected :oak/incomplete-app-decision]
+              (subvec below 0 2))
+           below)
+    (check "the exact 0.80 confidence boundary is admitted"
+           (= :ok (first at-boundary))
+           at-boundary)
+    (check "confidence above 1.00 is refused"
+           (= [:rejected :oak/incomplete-app-decision]
+              (subvec above 0 2))
+           above)
+    (check "an event without ontology dispatch semantics is refused by name"
+           (= [:rejected :oak/unknown-app-event]
+              (subvec unknown 0 2))
+           unknown)
+    (check "the selected SHACL enum rejects an unknown status by name"
+           (= [:rejected :oak/shape-violation]
+              (subvec invalid 0 2))
+           invalid)
+    (check "a SHACL-refused input produces no dataspace write"
+           (= "0" (doc-i64 (second before)))
+           before)
+    (check "the generated app executes ontology dispatch through the capability"
+           (= :ok (first executed))
+           executed)
+    (check "the executed app changed the graph, not just the compiler output"
+           (= "1" (doc-i64 (second census)))
+           census)))
+
 (defn- refusal-leaves-nothing [call]
   (-> (steps call
              [(fn [_] (call "call-declare" "t-1" ":tender"))
@@ -192,6 +273,8 @@
          (-> (admission-run (world host wasm))
              (.then report-admission)
              (.then (fn [_] (refusal-leaves-nothing (world host wasm))))
+             (.then (fn [_] (synthesis-run (world host wasm))))
+             (.then report-synthesis)
              (.then (fn [_]
                       (println (str "\noak on wasm: "
                                     (if (zero? @failures) "all checks passed"

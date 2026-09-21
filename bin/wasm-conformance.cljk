@@ -25,11 +25,18 @@
 
 (def amu (or (aget (.-env js/process) "AMU") "amu"))
 (def out (.join path (.mkdtempSync fs (.join path (.tmpdir os) "oak-")) "oak.wasm"))
+(def classpath (aget (.-env js/process) "OAK_CLASSPATH"))
+
+(when (str/blank? classpath)
+  (println "REFUSING to report a result: OAK_CLASSPATH must name provider/src,")
+  (println "text/src, and provider's pinned osaho src. A nearby osaho checkout")
+  (println "may be a different revision, so the runner does not guess.")
+  (.exit js/process 2))
 
 (def compiled
   (.spawnSync child amu
               (clj->js ["compile" kernel "--jvm-free" "--target" "wasm32-browser"
-                        "--policy" policy "--output" out])
+                        "--fuel" "8192" "--policy" policy "--output" out])
               #js {:cwd root :encoding "utf8"}))
 
 (when-not (zero? (or (.-status compiled) 1))
@@ -49,9 +56,10 @@
             (.exit js/process 2)))))
 
 (def result
-  (.spawnSync child "nbb"
-              (clj->js ["--classpath" (or (aget (.-env js/process) "OAK_CLASSPATH") "")
-                        (.join path root "test" "wasm-conformance.cljs")])
+  (.spawnSync child "kbb"
+              (clj->js ["--backend" "sci"
+                        "--classpath" classpath
+                        (.join path root "test" "wasm-conformance.cljk")])
               #js {:cwd root :stdio "inherit"
                    :env (js/Object.assign
                          #js {} js/process.env
