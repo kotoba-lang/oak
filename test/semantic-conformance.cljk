@@ -110,7 +110,9 @@
          (-> (instantiate)
              (.then
               (fn [runtime]
-                (let [ontology (host-doc->edn ((aget (.-exports (.-instance runtime)) "app-ontology")))
+                (let [exports (.-exports (.-instance runtime))
+                      ontology (host-doc->edn ((aget exports "app-ontology")))
+                      ontology-digest ((aget exports "app-ontology-digest"))
                       discovered (into {}
                                        (map (fn [role]
                                               [role (semantic/candidates-for-role
@@ -121,6 +123,7 @@
                            (= 1 (count (filter :permitted? (get discovered role))))
                            (get discovered role)))
                   {:ontology ontology
+                   :ontology-digest ontology-digest
                    :discovered discovered
                    :model-result (model-forward ontology discovered)})))
              (.then
@@ -136,28 +139,69 @@
                          decision))
                 (assoc state :decision-rows (decision-rows model-result))))
              (.then
-              (fn [{:keys [decision-rows] :as state}]
-                (-> (instantiate)
+              (fn [{:keys [decision-rows ontology-digest] :as state}]
+                (-> (js/Promise.all #js [(instantiate) (instantiate) (instantiate)])
                     (.then
-                     (fn [runtime]
-                       (let [exports (.-exports (.-instance runtime))
-                             decisions ((.-document (.-typedValues runtime))
-                                        (edn->raw-doc decision-rows))
-                             compiled (outcome ((aget exports "compile-app")
-                                                ":goal/tender-intake" decisions))]
-                         (check "trained choices compile in Kotoba/Amu"
+                     (fn [runtimes]
+                       (let [runtime (aget runtimes 0)
+                             invalid-runtime (aget runtimes 1)
+                             tamper-runtime (aget runtimes 2)
+                             exports (.-exports (.-instance runtime))
+                             invalid-exports (.-exports (.-instance invalid-runtime))
+                             tamper-exports (.-exports (.-instance tamper-runtime))
+                             transaction-value [:oak.transaction/v1
+                                                :goal/tender-intake
+                                                ontology-digest
+                                                decision-rows]
+                             transaction ((.-document (.-typedValues runtime))
+                                          (edn->raw-doc transaction-value))
+                             invalid-transaction ((.-document (.-typedValues invalid-runtime))
+                                                  (edn->raw-doc
+                                                   [:oak.transaction/v1
+                                                    :goal/tender-intake
+                                                    "wrong-ontology-digest"
+                                                    decision-rows]))
+                             invalid (outcome ((aget invalid-exports "compile-app-transaction")
+                                               invalid-transaction))
+                             compiled (outcome ((aget exports "compile-app-transaction")
+                                                transaction))]
+                         (check "a typed transaction for another ontology is refused"
+                                (= [:rejected :oak/invalid-app-transaction]
+                                   (subvec invalid 0 2))
+                                invalid)
+                         (check "trained choices compile as a typed ontology transaction"
                                 (= :ok (first compiled))
-                                {:compiled compiled :decisions decision-rows})
+                                {:compiled compiled :transaction transaction-value})
                          (when (= :ok (first compiled))
-                           (let [queried (outcome ((aget exports "query-app") (second compiled)))]
-                             (check "Kotoba runtime exposes the selected semantic plan"
+                           (let [manifest-edn (host-doc->edn (second compiled))
+                                 tampered-manifest
+                                 (mapv (fn [row]
+                                         (if (= :app/execution (first row))
+                                           [(first row) (second row)
+                                            (mapv (fn [ir-row]
+                                                    (if (= :execution/effect (first ir-row))
+                                                      [:execution/effect :op/relate :tender]
+                                                      ir-row))
+                                                  (nth row 2))]
+                                           row))
+                                       manifest-edn)
+                                 tampered ((.-document (.-typedValues tamper-runtime))
+                                           (edn->raw-doc tampered-manifest))
+                                 tampered-result
+                                 (outcome ((aget tamper-exports "query-app") tampered))
+                                 queried (outcome ((aget exports "query-app") (second compiled)))]
+                             (check "a manifest with a rewritten Execution IR is refused"
+                                    (= [:rejected :oak/invalid-app-manifest]
+                                       (subvec tampered-result 0 2))
+                                    tampered-result)
+                             (check "Kotoba runtime exposes semantics plus typed Execution IR"
                                     (= :ok (first queried)) queried)
                              (assoc state :semantic-plan
                                     (host-doc->edn (second queried)))))))))))
              (.then
               (fn [{:keys [semantic-plan]}]
                 (when semantic-plan
-                  (let [[reasoner shape-plan plan] semantic-plan
+                  (let [[reasoner shape-plan plan execution] semantic-plan
                         profile (second reasoner)
                         triples [(semantic/triple :procurement :rdfs/subClassOf :tender)
                                  (semantic/triple :t-open :rdf/type :procurement)
@@ -173,6 +217,18 @@
                            (= [{'?t :t-open}] rows) rows)
                     (check "selected SHACL plan targets the dispatched ontology type"
                            (= :tender target) target)
+                    (check "Execution IR carries state, transaction, capability, causal link, effect and implementation"
+                           (= [[:execution/version :oak.execution/v1]
+                               [:execution/state :shape/tender-input]
+                               [:execution/transaction :action/declare-tender :event/submit]
+                               [:execution/capability :effect/dataspace-transact :dataspace/transact]
+                               [:execution/causal-link :event/submit :op/declare]
+                               [:execution/effect :op/declare :tender]
+                               [:execution/implementation
+                                :impl/oak-declare
+                                "bafyreiggpt55m7ke7qy7f2fxscdo4zq3pnq7gbssvrlqcwp6ofngp66xka"]]
+                              execution)
+                           execution)
                     (-> ((.-instantiateKotoba host) shacl-wasm #js {})
                         (.then
                          (fn [shacl-runtime]

@@ -1,7 +1,7 @@
 (ns oak.kernel
   (:export [main schema-digest oak-call
             call-declare call-relate call-related call-census
-            app-ontology app-ontology-digest compile-app query-app run-app
+            app-ontology app-ontology-digest compile-app compile-app-transaction query-app run-app
             compile-tender-app-at compile-tender-app-effect-at compile-tender-app
             run-tender-app-event run-tender-app])
   (:capabilities #{:dataspace/transact}))
@@ -468,9 +468,87 @@
       false)
     false))
 
-(defn app-manifest [goal :keyword decisions :document] :document
-  (document-vector
+(defn app-transaction [goal :keyword decisions :document] :document
+  (document-vector (document-keyword :oak.transaction/v1)
+                   (document-keyword goal)
+                   (document-string (app-ontology-digest))
+                   decisions))
+
+(defn transaction-goal [transaction :document] :keyword
+  (kw-at transaction 1))
+
+(defn transaction-decisions [transaction :document] :document
+  (at transaction 3))
+
+(defn transaction-valid? [transaction :document] :bool
+  (if (= (document-count transaction) 4)
+    (if (= (kw-at transaction 0) :oak.transaction/v1)
+      (let [goal (transaction-goal transaction)
+            decisions (transaction-decisions transaction)]
+        (if (string=? (option-or (document-string-value (at transaction 2)) "")
+                      (app-ontology-digest))
+          (if (app-goal? goal)
+            (all-roles-admitted? goal decisions)
+            false)
+          false))
+      false)
+    false))
+
+;; The execution value is the code that Jev is allowed to synthesize.  It is
+;; not source text or a function name: it is a closed, typed ontology value
+;; spanning the six canonical runtime planes.  The runtime re-derives this
+;; exact value from the current ontology before admitting an effect.
+
+(defn execution-ir [goal :keyword decisions :document] :document
+  (let [shape (choice-id decisions :shape)
+        action (choice-id decisions :action)
+        effect (choice-id decisions :effect)
+        implementation (choice-id decisions :implementation)
+        event (app-row-scan (app-ontology-doc) 0 :dispatch action 2)
+        op (app-row-scan (app-ontology-doc) 0 :dispatch action 3)
+        target (app-row-scan (app-ontology-doc) 0 :dispatch action 4)
+        capability (kw-at (component-body effect) 1)]
+    (document-vector
+     (document-vector (document-keyword :execution/version)
+                      (document-keyword :oak.execution/v1))
+     (document-vector (document-keyword :execution/state)
+                      (document-keyword shape))
+     (document-vector (document-keyword :execution/transaction)
+                      (document-keyword action)
+                      (document-keyword event))
+     (document-vector (document-keyword :execution/capability)
+                      (document-keyword effect)
+                      (document-keyword capability))
+     (document-vector (document-keyword :execution/causal-link)
+                      (document-keyword event)
+                      (document-keyword op))
+     (document-vector (document-keyword :execution/effect)
+                      (document-keyword op)
+                      (document-keyword target))
+     (document-vector (document-keyword :execution/implementation)
+                      (document-keyword implementation)
+                      (document-string (binding-scan (app-ontology-doc) 0 implementation))))))
+
+(defn execution-ir-valid? [ir :document goal :keyword decisions :document] :bool
+  (document-equal? ir (execution-ir goal decisions)))
+
+(defn ir-keyword-scan [ir :document i :i64 key :keyword slot :i64] :keyword
+  (if (= i (document-count ir))
+    :oak/none
+    (let [row (at ir i)]
+      (if (= (kw-at row 0) key)
+        (kw-at row slot)
+        (ir-keyword-scan ir (+ i 1) key slot)))))
+
+(defn app-manifest [transaction :document] :document
+  (let [goal (transaction-goal transaction)
+        decisions (transaction-decisions transaction)
+        ir (execution-ir goal decisions)]
+   (document-vector
    (document-vector (document-keyword :app/goal) (document-keyword goal))
+   (document-vector (document-keyword :app/transaction)
+                    (document-string (document-sha256 transaction))
+                    transaction)
    (document-vector (document-keyword :app/reasoner)
                     (document-keyword (choice-id decisions :reasoner))
                     (document-string (component-digest (choice-id decisions :reasoner))))
@@ -495,7 +573,20 @@
                     (document-string (binding-scan (app-ontology-doc) 0
                                                    (choice-id decisions :implementation))))
    (document-vector (document-keyword :app/ontology)
-                    (document-string (app-ontology-digest)))))
+                    (document-string (app-ontology-digest)))
+   (document-vector (document-keyword :app/execution)
+                    (document-string (document-sha256 ir))
+                    ir))))
+
+(defn compile-app-transaction [transaction :document]
+  [:variant :oak/outcome
+   [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
+    [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
+  (if (transaction-valid? transaction)
+    (let [manifest (app-manifest transaction)]
+      (ok manifest (evidence :compile-app-transaction manifest)))
+    (rejected :oak/invalid-app-transaction
+              "transaction version, ontology digest, goal, or typed selections are invalid")))
 
 (defn compile-app [goal :keyword decisions :document]
   [:variant :oak/outcome
@@ -503,8 +594,7 @@
     [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
   (if (app-goal? goal)
     (if (all-roles-admitted? goal decisions)
-      (let [manifest (app-manifest goal decisions)]
-        (ok manifest (evidence :compile-app manifest)))
+      (compile-app-transaction (app-transaction goal decisions))
       (rejected :oak/incomplete-app-decision
                 "choice missing, ambiguous, outside 0.80..1.00, wrong kind, incoherent, or not permitted"))
     (rejected :oak/unknown-app-goal "goal is absent from the ontology")))
@@ -532,6 +622,14 @@
       (if (= (kw-at row 0) key)
         (option-or (document-string-value (at row slot)) "")
         (manifest-slot-string-scan m (+ i 1) key slot)))))
+
+(defn manifest-slot-document-scan [m :document i :i64 key :keyword slot :i64] :document
+  (if (= i (document-count m))
+    (document-null)
+    (let [row (at m i)]
+      (if (= (kw-at row 0) key)
+        (at row slot)
+        (manifest-slot-document-scan m (+ i 1) key slot)))))
 
 (defn manifest-row-size-scan [m :document i :i64 key :keyword size :i64] :bool
   (if (= i (document-count m))
@@ -562,37 +660,81 @@
             false))
         (manifest-component-valid-scan m (+ i 1) key role goal)))))
 
+(defn manifest-selections-match? [m :document decisions :document] :bool
+  (if (= (manifest-value-scan m 0 :app/reasoner) (choice-id decisions :reasoner))
+    (if (= (manifest-value-scan m 0 :app/shape) (choice-id decisions :shape))
+      (if (= (manifest-value-scan m 0 :app/query) (choice-id decisions :query))
+        (if (= (manifest-value-scan m 0 :app/view) (choice-id decisions :view))
+          (if (= (manifest-value-scan m 0 :app/action) (choice-id decisions :action))
+            (if (= (manifest-value-scan m 0 :app/effect) (choice-id decisions :effect))
+              (= (manifest-value-scan m 0 :app/implementation)
+                 (choice-id decisions :implementation))
+              false)
+            false)
+          false)
+        false)
+      false)
+    false))
+
+(defn manifest-implementation-valid? [m :document] :bool
+  (let [implementation (manifest-value-scan m 0 :app/implementation)
+        action (manifest-value-scan m 0 :app/action)
+        binding (binding-scan (app-ontology-doc) 0 implementation)]
+    (if (string=? binding "")
+      false
+      (if (implementation-binds? implementation action)
+        (string=? (manifest-slot-string-scan m 0 :app/implementation 3) binding)
+        false))))
+
+(defn manifest-components-valid? [m :document goal :keyword] :bool
+  (if (manifest-component-valid-scan m 0 :app/reasoner :reasoner goal)
+    (if (manifest-component-valid-scan m 0 :app/shape :shape goal)
+      (if (manifest-component-valid-scan m 0 :app/query :query goal)
+        (if (manifest-component-valid-scan m 0 :app/view :view goal)
+          (if (manifest-component-valid-scan m 0 :app/action :action goal)
+            (if (manifest-component-valid-scan m 0 :app/effect :effect goal)
+              (if (manifest-component-valid-scan
+                   m 0 :app/implementation :implementation goal)
+                (manifest-implementation-valid? m)
+                false)
+              false)
+            false)
+          false)
+        false)
+      false)
+    false))
+
+(defn manifest-provenance-valid? [m :document goal :keyword transaction :document ir :document] :bool
+  (let [decisions (transaction-decisions transaction)]
+    (if (manifest-row-size-scan m 0 :app/transaction 3)
+      (if (transaction-valid? transaction)
+        (if (= goal (transaction-goal transaction))
+          (if (string=? (manifest-string-scan m 0 :app/transaction)
+                        (document-sha256 transaction))
+            (if (manifest-selections-match? m decisions)
+              (if (manifest-row-size-scan m 0 :app/execution 3)
+                (if (string=? (manifest-string-scan m 0 :app/execution)
+                              (document-sha256 ir))
+                  (execution-ir-valid? ir goal decisions)
+                  false)
+                false)
+              false)
+            false)
+          false)
+        false)
+      false)))
+
 (defn manifest-valid? [m :document] :bool
-  (let [goal (manifest-value-scan m 0 :app/goal)]
-    (if (= (document-count m) 9)
+  (let [goal (manifest-value-scan m 0 :app/goal)
+        transaction (manifest-slot-document-scan m 0 :app/transaction 2)
+        ir (manifest-slot-document-scan m 0 :app/execution 2)]
+    (if (= (document-count m) 11)
       (if (manifest-row-size-scan m 0 :app/goal 2)
         (if (app-goal? goal)
           (if (manifest-row-size-scan m 0 :app/ontology 2)
             (if (string=? (manifest-string-scan m 0 :app/ontology) (app-ontology-digest))
-              (if (manifest-component-valid-scan m 0 :app/reasoner :reasoner goal)
-                (if (manifest-component-valid-scan m 0 :app/shape :shape goal)
-                  (if (manifest-component-valid-scan m 0 :app/query :query goal)
-                  (if (manifest-component-valid-scan m 0 :app/view :view goal)
-                    (if (manifest-component-valid-scan m 0 :app/action :action goal)
-                      (if (manifest-component-valid-scan m 0 :app/effect :effect goal)
-                        (if (manifest-component-valid-scan
-                             m 0 :app/implementation :implementation goal)
-                          (let [implementation (manifest-value-scan m 0 :app/implementation)
-                                action (manifest-value-scan m 0 :app/action)
-                                binding (binding-scan (app-ontology-doc) 0 implementation)]
-                            (if (string=? binding "")
-                              false
-                              (if (implementation-binds? implementation action)
-                                (string=?
-                                 (manifest-slot-string-scan m 0 :app/implementation 3)
-                                 binding)
-                                false)))
-                          false)
-                        false)
-                      false)
-                    false)
-                    false)
-                  false)
+              (if (manifest-provenance-valid? m goal transaction ir)
+                (manifest-components-valid? m goal)
                 false)
               false)
             false)
@@ -610,7 +752,8 @@
           shape (manifest-value-scan manifest 0 :app/shape)]
       (ok (document-vector (component-body reasoner)
                            (component-body shape)
-                           (component-body query))
+                           (component-body query)
+                           (manifest-slot-document-scan manifest 0 :app/execution 2))
           (evidence :query-app
                     (document-vector (document-keyword reasoner)
                                      (document-keyword shape)
@@ -693,14 +836,15 @@
    [[:ok [:record :oak/ok [[:value :document] [:evidence :document]]]]
     [:rejected [:record :oak/rejected [[:code :keyword] [:detail :string]]]]]]
   (if (manifest-valid? manifest)
-    (let [action (manifest-value-scan manifest 0 :app/action)
-          effect (manifest-value-scan manifest 0 :app/effect)
-          shape (manifest-value-scan manifest 0 :app/shape)
-          op (dispatch-scan (app-ontology-doc) 0 action event 3)
-          arg (dispatch-scan (app-ontology-doc) 0 action event 4)
-          required-effect (dispatch-scan (app-ontology-doc) 0 action event 5)]
-      (if (= op :op/declare)
-        (if (= effect required-effect)
+    (let [ir (manifest-slot-document-scan manifest 0 :app/execution 2)
+          shape (ir-keyword-scan ir 0 :execution/state 1)
+          expected-event (ir-keyword-scan ir 0 :execution/transaction 2)
+          effect (ir-keyword-scan ir 0 :execution/capability 1)
+          op (ir-keyword-scan ir 0 :execution/effect 1)
+          arg (ir-keyword-scan ir 0 :execution/effect 2)]
+      (if (= event expected-event)
+        (if (= op :op/declare)
+          (if (= effect (manifest-value-scan manifest 0 :app/effect))
           (if (shacl-shape-valid? shape input arg)
             (do-declare
              (option-or (document-string-value
@@ -709,7 +853,8 @@
              arg)
             (rejected :oak/shape-violation "input does not satisfy the selected SHACL shape"))
           (rejected :oak/effect-mismatch "selected effect does not admit the action"))
-        (rejected :oak/unknown-app-event "no dispatch semantics for action and event")))
+          (rejected :oak/unknown-app-event "execution IR contains no admitted operation"))
+        (rejected :oak/unknown-app-event "event does not match the typed execution transaction")))
     (rejected :oak/invalid-app-manifest "manifest is not derived from the current ontology")))
 
 (defn tender-decisions-at-floors [action-confidence :i64 effect-confidence :i64] :document

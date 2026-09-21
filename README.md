@@ -46,11 +46,14 @@ admission before a byte is emitted.
 ## Ontology-only app synthesis with executable semantics
 
 The uncertain part of app construction is a choice among ontology identifiers,
-never source text.  A trained typed-decision model emits only finite rows of
-this form:
+never source text. A trained typed-decision model emits finite selections that
+are sealed into a typed ontology transaction:
 
 ```clojure
-[:choice :action :action/declare-tender 9900]
+[:oak.transaction/v1
+ :goal/tender-intake
+ "<ontology-digest>"
+ [[:choice :action :action/declare-tender 9900] ...]]
 ```
 
 The last value is confidence in basis points. Confidence floors are ontology
@@ -69,10 +72,13 @@ OWL 2 RL ── derives candidate role membership to a least fixpoint
 SPARQL ── discovers the finite ontology candidate sets
        │
        ▼
-compile-app ── validates goal, kind, role floor, permits, coherence
+compile-app-transaction ── validates version, ontology identity, role floor, permits, coherence
        │
        ▼
-app manifest ── pins reasoner/query + all component digests + ontology digest + DefCID
+Execution IR ── State / Transaction / Capability / CausalLink / Effect + Execution
+       │
+       ▼
+app manifest ── pins transaction, Execution IR, all component digests, ontology digest + DefCID
        │
        ▼
 query-app ── exposes the selected reasoner/shape/query plans
@@ -81,13 +87,17 @@ query-app ── exposes the selected reasoner/shape/query plans
 run-app / OaK F ── capability-gated dataspace effect
 ```
 
-`app-ontology-doc` is the source of truth.  It describes the goal, a
+`app-ontology-doc` is the source of truth. It describes the goal, a
 reasoner profile, SHACL input constraint, SPARQL algebra, view, action, effect,
 implementation binding, permissions, confidence floors, and dispatch
-semantics.  The nine-row manifest pins the reasoner and query alongside every
+semantics. The eleven-row manifest carries the complete typed model transaction
+and the compiler-derived Execution IR, pins both by digest, and also pins every
 component digest, the ontology digest, and the actual DefCID of `do-declare`.
-`run-app` never dispatches a function name from model output; it interprets a
-closed opcode after revalidation.
+The IR names the selected state shape, transaction/event, attenuated capability,
+causal link, effect opcode/target and implementation identity. `run-app`
+re-derives the canonical IR from the current ontology and requires exact
+document equality before interpreting its closed opcode; it never dispatches a
+function name from model output.
 
 The selected SHACL subset is executable, not documentary.  This experiment
 interprets required single-value `:string` / `:keyword` properties and
@@ -140,7 +150,8 @@ returned `:t-open` only after OWL-derived type membership and the selected
 SPARQL two-pattern join, and compiled the sibling SHACL source to Wasm before
 accepting `{:id "t-live" :status :open}` and rejecting the same shape with an
 unknown status. The default fuel 512 remains insufficient; the base suite uses
-8192 and the combined semantic instance uses 16384.
+16384 and the combined semantic instance uses 32768 after transaction and
+Execution IR validation are included.
 
 Run the two layers separately so missing model/engine inputs cannot look green:
 
@@ -244,10 +255,10 @@ To compile the kernel rather than interpret it:
 ```sh
 amu check   src/oak/kernel.kotoba --jvm-free --policy src/oak/policy.edn
 amu compile src/oak/kernel.kotoba --jvm-free --target wasm32-browser \
-            --fuel 8192 --policy src/oak/policy.edn --output oak.wasm
+            --fuel 16384 --policy src/oak/policy.edn --output oak.wasm
 ```
 
-Measured 2026-09-21, all JVM-free: the experiment is a **19,792-byte
+Measured 2026-09-21, all JVM-free: the experiment is a **22,187-byte
 `wasm32-browser-kotoba-v1` module**, which instantiates on
 `amu/runtime/browser-host.mjs` and returns the same `document-sha256` for S as
 the reference interpreter does.

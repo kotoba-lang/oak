@@ -219,10 +219,26 @@
         implementation-row (tagged-row manifest :app/implementation)
         ontology-in-manifest (second (second (tagged-vector-items ontology-row)))
         implementation-binding (second (nth (tagged-vector-items implementation-row) 3))]
-    (check "ontology-only decisions compile to a nine-row app manifest"
+    (check "ontology-only decisions compile to an eleven-row typed app manifest"
            (and (= :ok (first compiled))
-                (= 9 (count (tagged-vector-items manifest))))
+                (= 11 (count (tagged-vector-items manifest))))
            manifest)
+    (let [transaction-row (tagged-row manifest :app/transaction)
+          execution-row (tagged-row manifest :app/execution)
+          transaction (nth (tagged-vector-items transaction-row) 2)
+          execution (nth (tagged-vector-items execution-row) 2)]
+      (check "the manifest carries the typed Jev ontology transaction"
+             (= ["keyword" :oak.transaction/v1]
+                (first (tagged-vector-items transaction)))
+             transaction)
+      (check "the compiler emits all six canonical Execution IR planes"
+             (= #{:execution/version :execution/state :execution/transaction
+                  :execution/capability :execution/causal-link
+                  :execution/effect :execution/implementation}
+                (set (map (fn [row]
+                            (second (first (tagged-vector-items row))))
+                          (tagged-vector-items execution))))
+             execution))
     (check "the manifest pins the ontology digest used by the compiler"
            (= ontology-digest ontology-in-manifest)
            {:ontology ontology-digest :manifest ontology-in-manifest})
