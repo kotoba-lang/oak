@@ -1,5 +1,10 @@
 # oak
 
+OaK's portable ontology execution adapters are consumable as a pinned Git
+dependency. `deps.edn` exposes `src/oak/semantic.cljk` together with the exact
+Datalog, datom source, OWL 2 RL rules, and SPARQL engine revisions used by the
+adapter; downstream runtimes do not need to reconstruct that classpath.
+
 **OaK — the ontology as the kernel.** An agent does not act on the graph. It
 hands `oak-call` a typed value naming what it wants, and a schema decides
 whether that is a thing the world admits. Written in Kotoba, compiled by amu,

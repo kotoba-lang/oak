@@ -1,0 +1,13 @@
+{:paths ["src"]
+ :deps {io.github.kotoba-lang/datalog
+        {:git/url "https://github.com/kotoba-lang/datalog.git"
+         :git/sha "9c86cc8d1009d4d2e72640a624bb5e0ea6a465e1"}
+        io.github.kotoba-lang/datom-source
+        {:git/url "https://github.com/kotoba-lang/datom-source.git"
+         :git/sha "1c3875df01e816e8188e65c8179f1491c8cdfef8"}
+        io.github.kotoba-lang/org-w3-owl2
+        {:git/url "https://github.com/kotoba-lang/org-w3-owl2.git"
+         :git/sha "2392927cd595ab2eb4264e09e989f2a396962a7d"}
+        io.github.kotoba-lang/sparql
+        {:git/url "https://github.com/kotoba-lang/sparql.git"
+         :git/sha "8809be30fa48eb9a7e11c9a9cb054ea60740001e"}}}
