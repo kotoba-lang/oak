@@ -130,14 +130,44 @@ artifact revision; recorded answers are not substituted for a forward pass.
 
 ### Semantic boundary
 
-The executable reasoner is **general OWL 2 RL/RDFS over arbitrary input
-triples**. It covers recursive subclass/subproperty/type inference and the
-property-level domain, range, transitive, symmetric and inverse rules implemented
-by `org-w3-owl2`. It is not full OWL 2 DL/SROIQ: existential introduction,
-disjunction, unrestricted cardinality reasoning and tableau consistency are not
-silently approximated. Asking for `:owl2-dl` returns
-`:oak/unsupported-owl-profile`. This fail-closed boundary is part of the runtime
-contract, not a README caveat masquerading as implementation.
+The executable reasoner runs over arbitrary input triples, on two paths:
+
+| call | rules | engine | output |
+|---|---|---|---|
+| `(materialize :owl2-rl triples)` | `owl.rules/triple-rules`: subclass/subproperty/type closure, domain, range, transitive, symmetric, inverse | `datalog` least fixpoint | asserted + derived triples. **Unchanged** -- same set as before `entail` existed |
+| `(entail :owl2-rl triples opts)` | the complete OWL 2 RL/RDF table, `owl.rules/owl2-rl-rules` (Profiles §4.3 Tables 4-9; eq-ref omitted, dt-* decided for xsd string/boolean/decimal/integer family/dateTime) | `owl.rl` semi-naive fixpoint | `{:graph :inferred :inconsistencies :consistent? :rules :diagnostics :counts}` |
+| `(materialize :owl2-rl triples opts)` | as `entail` | `owl.rl` | `(:graph (entail ...))`; an inconsistent graph throws `:oak/owl-inconsistent` with the structured `:inconsistencies` unless `:allow-inconsistent? true` |
+
+The complete path EMITS schema entailments as triples (`:schema? true`, the
+default): the transitive `rdfs:subClassOf` / `rdfs:subPropertyOf` closures,
+equivalences and propagated domains/ranges, so a consumer reads superclasses
+from the graph. Its graph is a superset of the 2-arity one (measured on DoDAF
+DM2 below), which is why it is a separate arity rather than a change to the
+old one. Inconsistencies (every RL rule concluding `false`) come back as
+`{:rule :cax-dw :table 7 :triples [...]}` -- never dropped. `supported-owl-rules`
+and `supported-owl-vocabulary` (and `owl.rules/vocabulary-status`) list what
+is implemented, so a caller can refuse an axiom whose rule is missing.
+
+It is not full OWL 2 DL/SROIQ: existential introduction, disjunction,
+unrestricted cardinality reasoning and tableau consistency are not silently
+approximated. Asking for `:owl2-dl` returns `:oak/unsupported-owl-profile`.
+This fail-closed boundary is part of the runtime contract, not a README caveat
+masquerading as implementation.
+
+Measured 2026-09-25 (`bench/dm2.cljk`, kbb SCI engine, a shared host at load
+average ~100, so wall times are noisy): the DoDAF DM2 2.02 Mithril Form
+(173 classes, 81 object properties, 712 axiom/declaration triples) plus a
+deterministic synthetic instance graph --
+
+| instance triples | 2-arity (datalog) | `entail` | `entail :schema? false` | 2-arity triples missing from `entail` |
+|---|---|---|---|---|
+| 3,000 | 41-60 s | 3.9-6.4 s | 1.4-2.1 s | 0 |
+| 6,000 | 113 s | 12.3 s | 4.8 s | 0 |
+
+```sh
+kbb --backend sci --classpath <oak/src:org-w3-owl2/src:sparql/src:datalog+datom-source+text> \
+  bench/dm2.cljk <dm2-form-file> [individuals] [edges]
+```
 
 SHACL remains a bounded executable subset (minimum/maximum count, canonical
 document datatypes, `sh:in`, and node kind in the sibling engine; the current

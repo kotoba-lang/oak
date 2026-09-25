@@ -9,6 +9,7 @@
   and it refuses operators outside the engines' proved semantics."
   (:require [datalog.core :as datalog]
             [datom.source :as source]
+            [owl.rl :as rl]
             [owl.rules :as owl]
             [sparql.core :as sparql]))
 
@@ -42,16 +43,71 @@
           (concat (map (fn [[s p o]] (triple s p o)) derived-triples)
                   (map (fn [[s c]] (triple s :rdf/type c)) derived-types)))))
 
-(defn materialize
-  "Run a named OWL profile or fail closed.  Full OWL 2 DL/SROIQ is not
-  silently approximated by RL."
-  [profile triples]
-  (if (= profile supported-owl-profile)
-    (materialize-owl2-rl triples)
+(def supported-owl-rules
+  "The OWL 2 RL rule ids the complete path (`entail`, `materialize` with
+  opts) evaluates -- `owl.rules/supported-rules`. Refuse an axiom whose rule
+  is not here rather than reason without it."
+  owl/supported-rules)
+
+(def supported-owl-vocabulary
+  "The owl:/rdfs:/rdf:/xsd: IRIs the complete path gives RL semantics to --
+  `owl.rules/supported-vocabulary`; `owl.rules/vocabulary-status` says what
+  happens to every other known IRI."
+  owl/supported-vocabulary)
+
+(defn- check-profile! [profile]
+  (when-not (= profile supported-owl-profile)
     (throw (ex-info "OaK has no qualified engine for the requested OWL profile"
                     {:code :oak/unsupported-owl-profile
                      :requested profile
                      :supported supported-owl-profile}))))
+
+(defn entail
+  "The COMPLETE OWL 2 RL/RDF closure (Profiles §4.3 Tables 4-9, as
+  `owl.rules/owl2-rl-rules` states them) with its inconsistencies, as data.
+
+  opts are `owl.rl/entail`'s: `:schema?` (default true -- EMIT the
+  subClassOf/subPropertyOf closures, equivalences and propagated
+  domains/ranges as triples), `:vocabulary` (default the keyword vocabulary
+  this adapter's `triple` callers use), `:rules` (a subset).
+
+  Returns {:graph #{triple} :inferred #{triple}
+           :inconsistencies [{:rule id :table n :triples [triple ...]}]
+           :consistent? bool :rules [id] :diagnostics {...} :counts {...}
+           :profile :owl2-rl :engine :owl.rl}
+  An inconsistent graph is a result here, never an exception."
+  ([profile triples] (entail profile triples {}))
+  ([profile triples opts]
+   (check-profile! profile)
+   (assoc (rl/entail triples opts) :profile profile :engine :owl.rl)))
+
+(defn materialize
+  "Run a named OWL profile or fail closed.  Full OWL 2 DL/SROIQ is not
+  silently approximated by RL.
+
+  Two arities, two contracts:
+
+  `(materialize :owl2-rl triples)` -- UNCHANGED: `materialize-owl2-rl`, the
+  RDFS core of `owl.rules/triple-rules` evaluated by `datalog`. Same rules,
+  same output set, byte for byte, as before `entail` existed; callers that
+  compare entailed sets keep their equalities.
+
+  `(materialize :owl2-rl triples opts)` -- the complete RL closure of
+  `entail`, as a set. Its set is a SUPERSET of the 2-arity one (schema
+  triples, owl:sameAs, datatype typing, axiomatic triples), so it is opt-in.
+  An inconsistent graph throws `:oak/owl-inconsistent` carrying the
+  structured `:inconsistencies`; pass `:allow-inconsistent? true` to get the
+  closure anyway, or call `entail` to get both as data."
+  ([profile triples]
+   (check-profile! profile)
+   (materialize-owl2-rl triples))
+  ([profile triples opts]
+   (let [r (entail profile triples (dissoc opts :allow-inconsistent?))]
+     (when (and (not (:consistent? r)) (not (:allow-inconsistent? opts)))
+       (throw (ex-info "OWL 2 RL: the graph is inconsistent"
+                       {:code :oak/owl-inconsistent
+                        :inconsistencies (:inconsistencies r)})))
+     (:graph r))))
 
 (defn- logic-var [x]
   (if (and (keyword? x) (.startsWith (name x) "?"))

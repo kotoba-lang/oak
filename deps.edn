@@ -7,7 +7,9 @@
          :git/sha "1c3875df01e816e8188e65c8179f1491c8cdfef8"}
         io.github.kotoba-lang/org-w3-owl2
         {:git/url "https://github.com/kotoba-lang/org-w3-owl2.git"
-         :git/sha "2392927cd595ab2eb4264e09e989f2a396962a7d"}
+         ;; 93214e9: owl.rl + owl.rules/owl2-rl-rules (the complete OWL 2 RL
+         ;; table) that `entail` / 3-arity `materialize` evaluate. Floor.
+         :git/sha "93214e91615704fd51534f6b9a2dd4ded821a362"}
         io.github.kotoba-lang/sparql
         {:git/url "https://github.com/kotoba-lang/sparql.git"
          :git/sha "8809be30fa48eb9a7e11c9a9cb054ea60740001e"}}}
